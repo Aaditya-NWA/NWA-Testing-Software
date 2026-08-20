@@ -67,7 +67,7 @@ print("=" * 56)
 print()
 print("-- Cross-file contract with the .ino ----")
 
-ino = Path(__file__).resolve().parents[1] / "Arduino" / "vib_throttle_dashbaord_v4.ino"
+ino = Path(__file__).resolve().parents[1] / "Arduino" / "nwa_testing_software.ino"
 src = ino.read_text(encoding="utf-8", errors="replace")
 
 m = re.search(r"const\s+int\s+NUM_SEGS\s*=\s*(\d+)", src)

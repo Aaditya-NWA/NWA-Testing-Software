@@ -497,7 +497,7 @@ class SerialManager:
                 self.firmware_protocol = "legacy-ascii"
                 print("[Serial] NOTE: board is running pre-v9 ASCII firmware — "
                       "running in compatibility mode (~220 Hz, no MCU timestamps). "
-                      "Reflash vib_throttle_dashbaord_v4.ino for the v9 acquisition path.")
+                      "Reflash nwa_testing_software.ino for the v9 acquisition path.")
             self.stats["samples"] += 1
             self._emit_sample(legacy)
             return 0

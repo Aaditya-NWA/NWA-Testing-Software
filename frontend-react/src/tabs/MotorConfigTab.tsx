@@ -34,7 +34,7 @@
 //
 //     * the backend's /set_throttle refuses anything outside active_profile;
 //     * the firmware's command handler SILENTLY IGNORES a throttle value
-//       outside its own THR_MIN..THR_MAX (vib_throttle_dashbaord_v4.ino,
+//       outside its own THR_MIN..THR_MAX (nwa_testing_software.ino,
 //       the final `else` in handleCommand(): `if (val >= THR_MIN && val <=
 //       THR_MAX)`). No error, no ack — the motor simply does not move.
 //

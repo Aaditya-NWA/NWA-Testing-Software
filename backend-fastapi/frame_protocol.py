@@ -2,7 +2,7 @@
 frame_protocol.py — [NEW v9] binary telemetry codec.
 
 This module is one half of a two-sided contract. The other half is
-Arduino/vib_throttle_dashbaord_v4.ino. Changing either without the
+Arduino/nwa_testing_software.ino. Changing either without the
 other breaks the link silently, which is exactly the failure mode
 CLAUDE.md's "Firmware/backend contract" section warns about — so the
 frame layout is spelled out in both files and the constants below are

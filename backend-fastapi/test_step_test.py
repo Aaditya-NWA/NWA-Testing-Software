@@ -5,7 +5,7 @@ test_step_test.py -- [CHANGED v10] Step Test sequencer check, no hardware.
 chained firmware THROTTLE_HOLD commands, on the theory that the firmware's
 resetThrottleHold() leaves `throttle` wherever it currently is. Real
 hardware testing showed the motor returning to THR_MIN between every step.
-The actual cause: vib_throttle_dashbaord_v4.ino's command handler sets
+The actual cause: nwa_testing_software.ino's command handler sets
 `throttle = THR_MIN` unconditionally on every THROTTLE_HOLD command (see
 the "else if (strncmp(cmd, "THROTTLE_HOLD:"..." branch) -- there is no
 firmware primitive that continues a hold from wherever the motor is, no

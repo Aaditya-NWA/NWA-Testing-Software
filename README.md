@@ -15,7 +15,7 @@ frontend-react/     React + Vite dashboard                    (port 3000)
 
 - Python 3.11
 - Node.js 18+
-- Arduino Uno with `vib_throttle_dashbaord_v4.ino` already flashed
+- Arduino Uno with `nwa_testing_software.ino` already flashed
   (needs the `Servo`, `Wire` and `SparkFunLSM6DSO` libraries)
 
 ## Setup

@@ -197,7 +197,7 @@ print("\n----------------------------------------------------")
 print("\n-- Firmware/backend contract (cross-file) ----------")
 import os as _os, re as _re
 _ino = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                     "..", "Arduino", "vib_throttle_dashbaord_v4.ino")
+                     "..", "Arduino", "nwa_testing_software.ino")
 if not _os.path.exists(_ino):
     check("firmware sketch found", False, _ino)
 else:
