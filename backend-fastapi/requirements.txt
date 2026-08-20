@@ -1,0 +1,13 @@
+fastapi==0.111.0
+# [PIN v12] starlette is pinned explicitly even though fastapi already
+# constrains it (>=0.37.2,<0.38), because this is exactly where a shared
+# environment goes wrong: streamlit 1.61.1 requires starlette
+# >=0.46.0,<1.4.0, a range that does NOT overlap fastapi 0.111.0's. Install
+# both into one environment and the backend dies at import time with
+# "Router.__init__() got an unexpected keyword argument 'on_startup'".
+# Install this project into its own venv (see start_dashboard.bat).
+starlette==0.37.2
+uvicorn[standard]==0.29.0
+pyserial==3.5
+websockets==12.0
+pydantic==2.7.1

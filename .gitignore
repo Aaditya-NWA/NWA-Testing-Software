@@ -1,0 +1,157 @@
+# ============================================================
+# NW Reliable Vibration Dashboard
+# ============================================================
+
+# ----------------------------
+# Python
+# ----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ----------------------------
+# IDE
+# ----------------------------
+.vscode/
+.idea/
+*.code-workspace
+
+# ----------------------------
+# OS
+# ----------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ----------------------------
+# Logs
+# ----------------------------
+*.log
+logs/
+
+# ----------------------------
+# Build
+# ----------------------------
+build/
+dist/
+*.egg-info/
+
+# ----------------------------
+# Environment
+# ----------------------------
+.env
+.env.*
+
+# ----------------------------
+# Generated Data
+# ----------------------------
+
+# CSV files
+*.csv
+
+# Excel files
+*.xlsx
+*.xls
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated folders
+output/
+outputs/
+results/
+reports/
+recordings/
+captures/
+exports/
+
+# Ignore generated data inside data folder
+data/**/*.csv
+data/**/*.xlsx
+data/**/*.xls
+data/**/*.db
+
+# ----------------------------
+# Archives
+# ----------------------------
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+
+# ----------------------------
+# Keep Source Code
+# ----------------------------
+!*.py
+!*.ino
+!*.md
+!*.txt
+!*.json
+!*.yaml
+!*.yml
+!requirements.txt
+!README.md
+!LICENSE
+
+
+# ----------------------------
+# Node.js
+# ----------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Frontend build
+.next/
+.nuxt/
+.svelte-kit/
+dist/
+build/
+
+# Package manager caches
+.npm/
+.pnpm-store/
+.yarn/
+
+# ----------------------------
+# Local-only project files
+# ----------------------------
+backend-fastapi/Test Data/DBG Logs/
+frontend-react/src/APPsafehouse.txt
+
+# Motor profiles calibrated on THIS bench [v11] — operator data, not source.
+# The three built-in profiles live in frontend-react/src/motorProfiles.ts;
+# this file is whatever the Motor Config tab measured on this machine.
+backend-fastapi/motor_profiles.json
+backend-fastapi/motor_profiles.json.tmp
+backend-fastapi/motor_profiles.test.json
+
+# Migrated pre-v13 data stores — kept on disk for recovery, never in the repo
+*.json.migrated
+
+# Documentations
+/docs
+
+# Claude config
+.claude/
