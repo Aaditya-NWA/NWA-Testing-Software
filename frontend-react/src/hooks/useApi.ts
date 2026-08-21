@@ -39,6 +39,23 @@ async function req(path: string, body?: object | null, forcePost = false) {
   return r.json();
 }
 
+/** Readiness probe for the startup gate. [NEW v14]
+ *
+ *  Deliberately outside `req()`: it must resolve to null on a refused
+ *  connection rather than throw, because "nothing is listening yet" is the
+ *  normal state for the first second of every launch. The signature check
+ *  stops some unrelated service on port 8000 from reading as our backend. */
+export async function probeHealth(): Promise<{ version: string } | null> {
+  try {
+    const r = await fetch(`${BASE}/health`, { cache: "no-store" });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j?.app === "nwa-testing-software" ? j : null;
+  } catch {
+    return null;
+  }
+}
+
 // [NEW v11] Saved motor profiles are the only resource with a DELETE.
 export const api = {
   // ── [NEW v13] Auth ────────────────────────────────────────────────────

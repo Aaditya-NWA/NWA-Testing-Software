@@ -85,6 +85,23 @@ def logs_dir() -> Path:
     return _sub("Logs")
 
 
+def runtime_file() -> Path:
+    """Where a running backend advertises its PID, port and shutdown token.
+
+    [NEW v14] Deliberately NOT under Documents: this is machine-local runtime
+    state with a lifetime of one run, and the operator opens the Documents
+    folder by hand to fetch CSVs. It also must not be readable by a web page,
+    which is what lets the shutdown token gate /shutdown — see main.py.
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or "."
+        d = Path(base) / APP_NAME
+    else:
+        d = Path.home() / ".cache" / APP_NAME
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "runtime.json"
+
+
 def bundle_dir() -> Path:
     """Where the code itself lives — read-only once frozen.
 

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the dashboard is allowed to call. Deliberately small: the app's own #[tauri::command]s need no entry here, so this covers only the plugin APIs the update flow uses.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "updater:default",
+    "process:allow-restart"
+  ]
+}

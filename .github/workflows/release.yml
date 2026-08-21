@@ -1,0 +1,127 @@
+# Builds and publishes a release when a v* tag is pushed.
+#
+# Free on this repository: GitHub Actions has no minute limit for public repos,
+# and windows-latest already ships Rust, MSVC and Python — nothing here needs a
+# paid runner or a paid service.
+#
+# The tag drives everything. `v1.0.0` must match `version` in
+# src-tauri/tauri.conf.json exactly, or the updater compares the installed
+# build against a release it does not recognise. test_deployment.py fails the
+# build before that can ship.
+#
+# Two different signatures are involved and they are not interchangeable:
+#   * TAURI_SIGNING_PRIVATE_KEY  — the UPDATER signature. Required: without it
+#     the installed app refuses the update it downloads.
+#   * WINDOWS_CERTIFICATE        — Authenticode. Optional; its only job is to
+#     stop SmartScreen warning on the installer.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v1.0.0)"
+        required: true
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    # Lifted to the job so the optional signing step can test for it. A secret
+    # cannot be read directly from a step-level `if:`.
+    env:
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend-fastapi/requirements.txt
+          pip install pyinstaller==6.11.1
+
+      - name: Freeze the backend
+        working-directory: backend-fastapi
+        run: python -m PyInstaller backend.spec --noconfirm --clean
+
+      - name: Install frontend and shell dependencies
+        run: |
+          npm ci
+          npm --prefix frontend-react ci
+
+      # Runs before the bundle is built, so a version mismatch or a broken
+      # Rust/Python contract fails here rather than shipping.
+      - name: Deployment contract checks
+        working-directory: backend-fastapi
+        run: python test_deployment.py
+
+      - name: Backend test suites
+        working-directory: backend-fastapi
+        run: |
+          python test_protocol.py
+          python test_ingest.py
+          python test_step_test.py
+          python test_motor_profiles.py
+          python test_auth.py
+
+      - name: Frontend test suites
+        working-directory: frontend-react
+        run: npm test
+
+      # Optional. Skipped cleanly when the secrets are absent, which is the
+      # normal state until a certificate exists.
+      - name: Import the Windows code-signing certificate
+        if: ${{ env.WINDOWS_CERTIFICATE != '' }}
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          $bytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          Set-Content -Path cert.pfx -Value $bytes -AsByteStream
+          $pw = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          $c = Import-PfxCertificate -FilePath cert.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          "TAURI_WINDOWS_CERTIFICATE_THUMBPRINT=$($c.Thumbprint)" >> $env:GITHUB_ENV
+          Remove-Item cert.pfx
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "NWA Testing Software __VERSION__"
+          releaseBody: |
+            Windows installer below (`.exe`).
+
+            First install on a machine: see `docs/DEPLOYMENT.md` for the
+            one-time certificate trust step. Existing installations are offered
+            this update automatically within 3 days.
+
+            Motor configurations, test data and activity logs in
+            `Documents\NWA Testing Software\` are not touched by an update.
+          releaseDraft: true
+          prerelease: false
+          # Writes latest.json alongside the installer — this is the file the
+          # installed app polls, and the endpoint in tauri.conf.json points at it.
+          includeUpdaterJson: true

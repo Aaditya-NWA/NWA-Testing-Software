@@ -1,0 +1,16 @@
+{
+  "name": "nwa-testing-software",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Desktop shell — Tauri CLI lives here, the React app lives in frontend-react/",
+  "scripts": {
+    "backend:build": "backend-fastapi\\venv\\Scripts\\python.exe -m PyInstaller backend-fastapi\\backend.spec --noconfirm --clean --distpath backend-fastapi\\dist --workpath backend-fastapi\\build",
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "npm run backend:build && tauri build",
+    "signer:generate": "tauri signer generate -w .tauri-updater.key"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  }
+}

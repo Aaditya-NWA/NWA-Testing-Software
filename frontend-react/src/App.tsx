@@ -21,6 +21,8 @@ import {
 } from "./context/connection";
 import ConnectionBar from "./components/ConnectionBar";
 import InfoPanel, { InfoButton } from "./components/InfoPanel";
+import StartupGate from "./components/StartupGate";
+import UpdateManager from "./components/UpdateManager";
 import ControlTab from "./tabs/ControlTab";
 import MotorConfigTab from "./tabs/MotorConfigTab";
 import AnalysesTab from "./tabs/AnalysesTab";
@@ -29,10 +31,16 @@ import logoUrl from "./assets/logo.png";
 import "./App.css";
 
 export default function App() {
+  // [NEW v14] StartupGate is outermost — outside AuthProvider too. Signing in
+  // is itself a backend call, so a login screen shown before the backend binds
+  // port 8000 would fail with "not signed in" for a backend that has simply
+  // not started yet.
   return (
-    <AuthProvider>
-      <AppAuthGate />
-    </AuthProvider>
+    <StartupGate>
+      <AuthProvider>
+        <AppAuthGate />
+      </AuthProvider>
+    </StartupGate>
   );
 }
 
@@ -174,6 +182,11 @@ function Dashboard() {
           onClose={() => setInfoOpen(false)}
         />
       )}
+
+      {/* Mounted inside the dashboard, not the shell: an update prompt on the
+          login screen would interrupt someone who has not started working, and
+          the "never while connected" rule needs the connection context. */}
+      <UpdateManager />
 
       {signOutOpen && (
         <SignOutDialog

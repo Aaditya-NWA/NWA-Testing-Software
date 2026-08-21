@@ -22,15 +22,31 @@ from typing import Optional
 
 class _TeeStdout(io.TextIOBase):
     """A capture file failing to open/write must never take down console
-    output or crash the app, so every capture-side operation is wrapped."""
+    output or crash the app, so every capture-side operation is wrapped.
+
+    [v14] `real_stdout` may be None. A PyInstaller windowed build has no
+    stdout at all, and a sidecar whose parent closed the pipe loses it
+    mid-run — either way an unguarded self._real.write() would turn every
+    print() in the backend into an AttributeError.
+    """
 
     def __init__(self, real_stdout):
         self._real = real_stdout
         self._lock = threading.Lock()
         self._capture: Optional[io.TextIOBase] = None
 
+    def _to_real(self, fn) -> None:
+        if self._real is None:
+            return
+        try:
+            fn(self._real)
+        except Exception:
+            self._real = None   # broken pipe: stop trying, keep capturing
+
     def write(self, s: str) -> int:
-        self._real.write(s)
+        # Flushed per write, not per line: as a Tauri sidecar stdout is a pipe,
+        # and Python block-buffers pipes — the shell would see nothing for 8 KB.
+        self._to_real(lambda r: (r.write(s), r.flush()))
         with self._lock:
             if self._capture is not None:
                 try:
@@ -41,7 +57,7 @@ class _TeeStdout(io.TextIOBase):
         return len(s)
 
     def flush(self):
-        self._real.flush()
+        self._to_real(lambda r: r.flush())
         with self._lock:
             if self._capture is not None:
                 try:

@@ -35,6 +35,7 @@ console_tee.install()
 import activity_log
 import app_paths
 import auth
+import version
 import motor_profiles as motor_profile_store
 from serial_manager import SerialManager
 from logger import CSVLogger
@@ -66,6 +67,60 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Process lifecycle: the two endpoints the desktop shell drives ─────────────
+# Both are deliberately outside the role gates. /health has to answer before
+# anyone has signed in — it is what the "Starting up..." screen waits on — and
+# /shutdown has to work when the only caller is the shell, which has no session.
+
+SERVER = None   # set by run_backend.py; None when running under `uvicorn --reload`
+
+HEALTH_SIGNATURE = "nwa-testing-software"
+
+
+@app.get("/health")
+def health():
+    """Liveness + identity. Unauthenticated by necessity.
+
+    `app` is an identity check, not decoration: the shell uses it to tell an
+    orphaned backend of ours on port 8000 apart from some unrelated service,
+    and those two need opposite recovery paths.
+    """
+    return {
+        "status": "ok",
+        "app": HEALTH_SIGNATURE,
+        "version": version.APP_VERSION,
+        "pid": os.getpid(),
+        "connected": serial_mgr.is_connected,
+        "frozen": app_paths.is_frozen(),
+    }
+
+
+@app.post("/shutdown")
+def shutdown(token: Optional[str] = Query(None)):
+    """Graceful stop — the safety-relevant exit path.
+
+    Setting should_exit lets uvicorn unwind the lifespan, and it is the
+    lifespan's teardown that calls disconnect_async(), which writes THR_MIN
+    and flushes it before closing the port. Killing the process instead skips
+    all of that and leaves the motor at its last commanded throttle, because
+    the firmware has no serial-loss failsafe.
+
+    The token comes from the runtime file (app_paths.runtime_file()), which a
+    web page cannot read. Without that gate any page the operator had open
+    could stop a running test with one cross-origin POST.
+    """
+    expected = os.environ.get("NWA_SHUTDOWN_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Not running under the desktop shell")
+    if token != expected:
+        raise HTTPException(status_code=403, detail="Bad shutdown token")
+    if SERVER is None:
+        raise HTTPException(status_code=503, detail="No server handle")
+    activity_log.log("SHUTDOWN_REQ", "graceful shutdown requested by the shell")
+    SERVER.should_exit = True
+    return {"status": "stopping"}
 
 
 def current_session(authorization: Optional[str] = Header(None)) -> auth.Session:
