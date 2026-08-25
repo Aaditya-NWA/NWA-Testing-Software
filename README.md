@@ -12,13 +12,6 @@ frontend-react/     React + Vite dashboard                    (port 3000)
 src-tauri/          desktop shell — bundles the two into one Windows app
 ```
 
-## Just want to use it?
-
-Install the latest release; nothing below is needed. `docs/DEPLOYMENT.md` has
-the one-time certificate step and the full install walkthrough.
-
-The rest of this file is the from-source development loop.
-
 ## Requirements
 
 - Python 3.11
@@ -83,25 +76,6 @@ Documents/NWA Testing Software/
   └── users.json
 ```
 
-## Development
-
-```powershell
-cd frontend-react; npm run build    # tsc strict + vite — the only typecheck gate
-cd frontend-react; npm test         # fft, plotData, throttle suites
-
-cd backend-fastapi; python test_protocol.py        # firmware/backend wire contract
-cd backend-fastapi; python test_ingest.py          # frames -> samples -> CSV
-cd backend-fastapi; python test_step_test.py       # Step Test sequencer
-cd backend-fastapi; python test_motor_profiles.py  # configuration store
-cd backend-fastapi; python test_auth.py            # accounts, roles, delete guards
-cd backend-fastapi; python test_deployment.py      # packaging + shell/backend contract
-```
-
-The test scripts are standalone — no framework, they just exit non-zero on
-failure. Run them plus `npm run build` after touching the serial protocol, the
-signal chain, or auth. GitHub Actions runs all of them before it builds a
-release.
-
 ### Building the desktop app
 
 ```powershell
@@ -109,9 +83,6 @@ npm install          # once, at the repo root — the Tauri CLI
 npm run dev          # the app, against the Vite dev server
 npm run build        # freeze the backend, then build the installer
 ```
-
-`docs/DEPLOYMENT.md` covers the toolchain, signing keys, releasing and
-installing.
 
 The firmware can't be built from this repo (no toolchain here) — compile it in
 the Arduino IDE before flashing. `test_protocol.py` parses the `.ino` and
