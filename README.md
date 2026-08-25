@@ -75,21 +75,3 @@ Documents/NWA Testing Software/
   ├── Logs/                   activity-YYYY-MM-DD.txt
   └── users.json
 ```
-
-### Building the desktop app
-
-```powershell
-npm install          # once, at the repo root — the Tauri CLI
-npm run dev          # the app, against the Vite dev server
-npm run build        # freeze the backend, then build the installer
-```
-
-The firmware can't be built from this repo (no toolchain here) — compile it in
-the Arduino IDE before flashing. `test_protocol.py` parses the `.ino` and
-checks its constants and ack strings still match the backend, which catches
-most drift but not a compile error.
-
-Longer engineering notes — architecture rationale, measured decisions, the
-wire format, known data caveats — live in `docs/` (`CLAUDE.md`, `plan.md`,
-`RESEARCH.md`). That folder is gitignored, so it stays on the bench machines
-rather than in the repo.
