@@ -22,7 +22,7 @@ import {
 import ConnectionBar from "./components/ConnectionBar";
 import InfoPanel, { InfoButton } from "./components/InfoPanel";
 import StartupGate from "./components/StartupGate";
-import UpdateManager from "./components/UpdateManager";
+import SettingsPanel from "./components/SettingsPanel";
 import ControlTab from "./tabs/ControlTab";
 import MotorConfigTab from "./tabs/MotorConfigTab";
 import AnalysesTab from "./tabs/AnalysesTab";
@@ -60,6 +60,7 @@ function Dashboard() {
 
   const [activeTab, setActiveTab] = useState<TabId>(tabs[0] ?? "control");
   const [infoOpen, setInfoOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [signOutOpen, setSignOutOpen] = useState(false);
   const [logoutMsg, setLogoutMsg] = useState<string | null>(null);
 
@@ -144,6 +145,17 @@ function Dashboard() {
             {session!.session_key}
           </span>
           <button
+            className="hu-gear"
+            onClick={() => {
+              setSettingsOpen(true);
+              void api.logActivity("SETTINGS", "opened").catch(() => {});
+            }}
+            title="Settings"
+            aria-label="Settings"
+          >
+            ⚙
+          </button>
+          <button
             className="hu-logs"
             onClick={() => void api.openLogsFolder().catch(() => {})}
             title="Open the activity log folder"
@@ -183,10 +195,10 @@ function Dashboard() {
         />
       )}
 
-      {/* Mounted inside the dashboard, not the shell: an update prompt on the
-          login screen would interrupt someone who has not started working, and
-          the "never while connected" rule needs the connection context. */}
-      <UpdateManager />
+      {/* Mounted inside the dashboard, not the shell: it needs the connection
+          context for the "never install while connected" rule, and settings are
+          meaningless before sign-in. */}
+      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
 
       {signOutOpen && (
         <SignOutDialog

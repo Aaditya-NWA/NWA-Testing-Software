@@ -103,6 +103,17 @@ jobs:
           "TAURI_WINDOWS_CERTIFICATE_THUMBPRINT=$($c.Thumbprint)" >> $env:GITHUB_ENV
           Remove-Item cert.pfx
 
+      # The Updates tab shows this as the update's heading. The tag's own
+      # annotation wins when there is one; otherwise the commit subject.
+      - name: Capture the release heading
+        id: heading
+        shell: bash
+        run: |
+          TITLE=$(git tag -l --format='%(contents:subject)' "${{ github.ref_name }}" 2>/dev/null || true)
+          if [ -z "$TITLE" ]; then TITLE=$(git log -1 --pretty=%s); fi
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "Release heading: $TITLE"
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -112,11 +123,13 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "NWA Testing Software __VERSION__"
           releaseBody: |
+            ${{ steps.heading.outputs.title }}
+
             Windows installer below (`.exe`).
 
             First install on a machine: see `docs/DEPLOYMENT.md` for the
-            one-time certificate trust step. Existing installations are offered
-            this update automatically within 3 days.
+            one-time certificate trust step. Existing installations pick this up
+            from Settings -> Updates -> Check for Updates.
 
             Motor configurations, test data and activity logs in
             `Documents\NWA Testing Software\` are not touched by an update.
@@ -125,3 +138,31 @@ jobs:
           # Writes latest.json alongside the installer — this is the file the
           # installed app polls, and the endpoint in tauri.conf.json points at it.
           includeUpdaterJson: true
+
+      # Adds `title` and `size` to latest.json. Neither is part of Tauri's own
+      # schema, and that is safe by inspection rather than by hope:
+      # tauri-plugin-updater deserialises into `InnerRemoteRelease`, a plain
+      # derived Deserialize with no deny_unknown_fields, and hands the WHOLE
+      # parsed document to the frontend as `rawJson`. So these two ride along
+      # untouched, and the Updates tab can show a heading and a download size
+      # before the operator commits to downloading anything.
+      - name: Add title and size to latest.json
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SETUP=$(find src-tauri/target/release/bundle/nsis -name '*-setup.exe' | head -1)
+          if [ -z "$SETUP" ]; then echo "no installer found"; exit 1; fi
+          SIZE=$(stat -c%s "$SETUP")
+          echo "installer: $SETUP ($SIZE bytes)"
+
+          gh release download "${{ github.ref_name }}" \
+            --pattern latest.json --output latest.json --clobber
+
+          jq --arg t "${{ steps.heading.outputs.title }}" --argjson s "$SIZE" \
+            '. + {title: $t, size: $s}' latest.json > latest.patched.json
+          mv latest.patched.json latest.json
+          cat latest.json
+
+          gh release upload "${{ github.ref_name }}" latest.json --clobber

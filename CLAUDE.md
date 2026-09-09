@@ -1030,18 +1030,52 @@ exports has a browser answer, so `npm run dev` never sees Tauri.
 
 ### Updates
 
-Driven from the frontend (`UpdateManager.tsx`) rather than Rust, because the
-two rules that matter are frontend facts: the activity log goes through
-`/activity/log`, and "never while connected to the Arduino" needs the
-connection context. Restarting mid-test would orphan a spinning motor, so the
-connection is re-checked at the moment INSTALL is clicked, not only when the
-prompt was raised. A declined version is recorded and never offered again.
+**[CHANGED v14] Checked only when the operator asks — Settings -> Updates ->
+CHECK FOR UPDATES.** There is no timer and no background check. The 3-day
+automatic check that 8.6 specified is gone, and the reason is a release-process
+constraint rather than a preference: the repository is **private by default**
+and made public only for the window in which an update is being handed out. A
+background check would 404 on every run for most of the year, so the only
+moment worth checking is one the operator chose.
+
+Three consequences, recorded so they are choices rather than surprises:
+
+* **An operator who never opens Settings never updates.** Acceptable at three
+  users who are told directly that a release exists; it would not be at thirty.
+* **A check made while the repository is private is indistinguishable from "no
+  update".** The app cannot tell 404-because-private from 404-because-nothing-
+  new, so both read as "No Updates Available." A false negative is the
+  deliberate failure direction here — the alternative is alarming the operator
+  about a state that is normal.
+* **The release must be PUBLISHED, not a draft.** GitHub does not serve draft
+  releases at `/releases/latest/download/`, so a draft is invisible to the
+  updater even while the repository is public.
+
+`title` and `size` are injected into `latest.json` by the release workflow and
+read back through `update.rawJson`. That is safe by inspection, not by hope:
+`tauri-plugin-updater` deserialises into `InnerRemoteRelease`, a plain derived
+`Deserialize` with **no `deny_unknown_fields`**, and `raw_json` is the whole
+parsed document handed to the frontend untouched. Without them the tab still
+works — the title falls back to the first line of the release notes, and the
+size to `contentLength` once the download starts — so a workflow that skips the
+injection degrades rather than breaks.
+
+`download()` and `install()` are called separately rather than through
+`downloadAndInstall()`, so the progress bar can finish before the UI switches
+to "Installing...".
+
+The rule that survives unchanged from the automatic version: **never install
+while connected to the Arduino.** Installing restarts the application, and a
+restart mid-test orphans a spinning motor. It is re-checked at the moment
+UPDATE NOW is clicked, not only when the update was found.
 
 **The version string must match in four files** — `version.py`,
 `tauri.conf.json`, both `package.json`s — and the git tag is that string with a
 leading `v`. Drift is invisible: too low nags forever, too high never updates,
 and neither raises anything. `test_deployment.py` fails on drift and the
-release workflow runs it before building.
+release workflow runs it before building. The Settings tab shows the installed
+version by reading `/health`, which serves `version.py` — deliberately not a
+fifth copy of the string.
 
 ## Conventions
 
@@ -1076,7 +1110,7 @@ frontend-react/src/
   App.tsx          shell: providers, tab bar, role-filtered routing
   tabs/            ControlTab, MotorConfigTab, AnalysesTab, CorrectionMassTab
   components/      ConnectionBar, InfoPanel, Readouts (Gauge/ValRow/LogRow),
-                   StartupGate, UpdateManager
+                   StartupGate, SettingsPanel
   context/         auth.tsx, connection.tsx  (the two providers)
   lib/             balancing, fft, plotData, chartData, throttle,
                    motorProfiles, format, desktop  (+ their *.test.ts)
