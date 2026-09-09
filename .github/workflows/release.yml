@@ -110,14 +110,28 @@ jobs:
           "TAURI_WINDOWS_CERTIFICATE_THUMBPRINT=$($c.Thumbprint)" >> $env:GITHUB_ENV
           Remove-Item cert.pfx
 
-      # The Updates tab shows this as the update's heading. The tag's own
-      # annotation wins when there is one; otherwise the commit subject.
+      # The Updates tab shows this as the update's heading.
+      #
+      # The tag object is fetched EXPLICITLY rather than trusted to be present.
+      # actions/checkout does not reliably materialise the annotated tag object
+      # even at fetch-depth: 0 — it resolves the ref to a commit and detaches —
+      # so `%(contents:subject)` came back empty and the heading silently fell
+      # back to the last commit subject. That is exactly the failure this step
+      # exists to avoid, and it is invisible until someone reads the release.
       - name: Capture the release heading
         id: heading
         shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          TITLE=$(git tag -l --format='%(contents:subject)' "${{ github.ref_name }}" 2>/dev/null || true)
-          if [ -z "$TITLE" ]; then TITLE=$(git log -1 --pretty=%s); fi
+          git fetch --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG" || true
+          echo "tag object type: $(git cat-file -t "$TAG" 2>&1 || echo MISSING)"
+
+          TITLE=$(git for-each-ref "refs/tags/$TAG" --format='%(contents:subject)' 2>/dev/null || true)
+          if [ -z "$TITLE" ]; then
+            echo "WARNING: no annotated tag subject; falling back to commit subject"
+            TITLE=$(git log -1 --pretty=%s)
+          fi
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
           echo "Release heading: $TITLE"
 
