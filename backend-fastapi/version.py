@@ -16,4 +16,4 @@ no update is ever offered. Neither state raises an error anywhere.
 The git tag is this string with a leading "v".
 """
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"

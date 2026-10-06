@@ -15,6 +15,12 @@
 import { useConnection, BAUD_RATES, SAMPLING_RATES } from "../context/connection";
 import { SamplingRateId } from "../types";
 
+const FAULT_TITLE: Record<string, string> = {
+  imu:      "IMU fault — motor stopped by the Arduino",
+  failsafe: "Failsafe — motor stopped by the Arduino",
+  reboot:   "Arduino rebooted",
+};
+
 const STATUS_COLOR: Record<string, string> = {
   disconnected: "#666",
   connecting:   "#f5a623",
@@ -103,6 +109,43 @@ export default function ConnectionBar() {
           DISCONNECT
         </button>
       </div>
+
+      {/* [v15] Alarms: states where the screen can no longer be trusted to
+          reflect the motor. Never hidden behind the connection state — a
+          stall is exactly when "CONNECTED" is a lie. */}
+      {(c.backendUnresponsive || (c.connected && c.telemetryStalled) ||
+        c.firmwareFault || (!c.connected && c.linkError)) && (
+        <div className="connbar-alarms">
+          {c.backendUnresponsive && (
+            <div className="connbar-alarm">
+              ⛔ The backend is not responding. Commands are not reaching the Arduino.
+              If the motor is spinning, cut ESC power.
+            </div>
+          )}
+          {c.connected && c.telemetryStalled && (
+            <div className="connbar-alarm">
+              ⛔ No data from the Arduino for {c.telemetryAgeS != null ? `${c.telemetryAgeS.toFixed(0)} s` : "several seconds"}.
+              Throttle-down was sent, but the board may not be hearing commands.
+              If the motor is still spinning, cut ESC power.
+            </div>
+          )}
+          {c.firmwareFault && (
+            <div className="connbar-alarm">
+              ⛔ {FAULT_TITLE[c.firmwareFault.kind] ?? "Arduino reported a fault"}: {c.firmwareFault.message}
+              {c.firmwareFault.kind !== "imu" && (
+                <button className="connbar-dismiss" onClick={() => void c.dismissFirmwareFault()}>
+                  DISMISS
+                </button>
+              )}
+            </div>
+          )}
+          {!c.connected && c.linkError && (
+            <div className="connbar-alarm">
+              ⛔ Lost the USB connection: {c.linkError}. If the motor is spinning, cut ESC power.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Every warning below is non-fatal by design: the connection stands
           and the operator is told what is different from what they asked

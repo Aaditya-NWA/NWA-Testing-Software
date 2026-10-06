@@ -55,7 +55,7 @@ a = Analysis(
     # import can never put a dev-time script in an operator's install.
     excludes=[
         "test_protocol", "test_ingest", "test_step_test",
-        "test_motor_profiles", "test_auth", "test_deployment",
+        "test_motor_profiles", "test_auth", "test_deployment", "test_link_safety",
         "tkinter", "unittest", "pydoc", "doctest",
     ],
     noarchive=False,

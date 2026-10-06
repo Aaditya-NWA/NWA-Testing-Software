@@ -125,6 +125,10 @@ def main() -> int:
         ws="websockets",
         lifespan="on",
         access_log=False,
+        # Uvicorn runs the lifespan teardown (the THR_MIN write) only after
+        # every open handler finishes. Bounded well inside the shell's 8 s
+        # grace so one stuck handler can never skip the motor stop.
+        timeout_graceful_shutdown=3,
     )
     server = _Server(config)
     backend_app.SERVER = server   # what /shutdown flips should_exit on

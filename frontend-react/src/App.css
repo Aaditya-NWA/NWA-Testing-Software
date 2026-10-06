@@ -1375,6 +1375,21 @@ body { background: var(--bg); color: var(--text); font-family: var(--font-ui); }
 }
 .connbar-ok   { color: var(--green); }
 .connbar-warn { color: #ff6b6b; }
+.connbar-alarms { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.connbar-alarm {
+  background: rgba(255, 68, 68, 0.14);
+  border: 1px solid #ff4444;
+  border-radius: 2px;
+  color: #ff8080;
+  font-size: 11px; font-weight: 700; line-height: 1.5;
+  padding: 5px 8px;
+}
+.connbar-dismiss {
+  margin-left: 10px;
+  background: transparent; border: 1px solid #ff8080; border-radius: 2px;
+  color: #ff8080; cursor: pointer;
+  font-family: var(--font-mono); font-size: 10px; padding: 1px 8px;
+}
 .connbar-hint { color: var(--amber); }
 
 /* ── Active-range panel (Control tab) ───────────────────────────────────── */

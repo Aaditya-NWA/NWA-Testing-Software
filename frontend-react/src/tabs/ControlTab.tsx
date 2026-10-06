@@ -146,11 +146,12 @@ export default function ControlTab() {
     setAutoTestRunning(false);
     setThrottleHoldRunning(false);
     setStepTestRunning(false);
-    await api.emergencyStop();
-    await api.stopAutoTest();
-    await api.stopThrottleHold();
+    // [v15] Each step independently: one that times out must not skip the rest.
+    await api.emergencyStop().catch(() => {});
+    await api.stopAutoTest().catch(() => {});
+    await api.stopThrottleHold().catch(() => {});
     // An E-Stop ends the run, so the log that run opened is closed with it.
-    await stopLogIfAuto();
+    await stopLogIfAuto().catch(() => {});
   };
 
   const handleLogging = async () => {

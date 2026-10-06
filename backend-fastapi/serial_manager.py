@@ -20,6 +20,14 @@ Three invariants, each fixing a bug that was hard to see:
 
 disconnect_async() writes THR_MIN and flushes it BEFORE closing the port --
 that write is what actually spins the motor down.
+
+[v15] Every write goes through _write(): serialised, and BOUNDED. pyserial's
+flush() on Windows is `while out_waiting: sleep` with no timeout, so a board
+that stops taking data used to hang whichever thread wrote to it -- including
+the event loop, via E-Stop and Disconnect. Nothing here may block unbounded.
+A heartbeat thread sends HB every HEARTBEAT_INTERVAL_S; v11+ firmware stops
+the motor if it goes quiet. See "Motor runaway on IMU/link failure" in
+CLAUDE.md.
 """
 import asyncio
 import json
@@ -86,13 +94,30 @@ def parse_line(line: str) -> Optional[dict]:
 
 class SerialManager:
     BOOT_BAUD = 115200
+    HEARTBEAT_INTERVAL_S = 0.25     # firmware HOST_TIMEOUT_MS is 1500
+    DRAIN_TIMEOUT_S = 0.5
+    # Batch stamps jitter by a few ms around the fit; a real gap is seconds.
+    TIMELINE_BREAK_S = 0.05
 
     def __init__(self, ws_manager: WebSocketManager, csv_logger: CSVLogger):
         self._ws_manager = ws_manager
         self._csv_logger = csv_logger
         self._serial: Optional[serial.Serial] = None
         self._reader_thread: Optional[threading.Thread] = None
+        self._heartbeat_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._write_lock = threading.Lock()
+
+        # Called as on_event(event, detail) for link/firmware faults, so they
+        # reach the activity log without this module depending on it.
+        self.on_event = None
+
+        # time.monotonic() of the last decoded sample; None until the first.
+        self.last_sample_monotonic: Optional[float] = None
+        # Latest fault the firmware reported: {"kind", "message", "at"}.
+        self.firmware_fault: Optional[dict] = None
+        # Why the reader thread lost the port, if it did.
+        self.link_error: Optional[str] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._broadcast_task: Optional[asyncio.Task] = None
 
@@ -129,6 +154,7 @@ class SerialManager:
             "ws_drops": 0,          # live-view queue overflow (display only)
             "measured_rate_hz": 0.0,
             "tag_fallback": False,  # multi-word FIFO burst unsupported
+            "timeline_breaks": 0,   # [v15] sample gaps (IMU fault/recovery)
         }
         self._last_seq: Optional[int] = None
 
@@ -136,18 +162,25 @@ class SerialManager:
         # the Step Test sequencer as the starting point for its first ramp.
         self.last_throttle_us: Optional[int] = None
 
-    async def connect_async(self, port: str, baud_rate: int = 115200):
-        if self.is_connected:
-            await self.disconnect_async()
-
-        self._serial = serial.Serial(
+    def _open_port(self, port: str) -> serial.Serial:
+        ser = serial.Serial(
             port=port,
             baudrate=self.BOOT_BAUD,
             timeout=0.1,
             write_timeout=0.5,
         )
-        self._serial.reset_input_buffer()
+        ser.reset_input_buffer()
+        return ser
+
+    async def connect_async(self, port: str, baud_rate: int = 115200):
+        if self.is_connected or self._serial is not None:
+            await self.disconnect_async()
+
+        self._serial = await asyncio.to_thread(self._open_port, port)
         self.current_baud = self.BOOT_BAUD
+        self.last_sample_monotonic = None
+        self.firmware_fault = None
+        self.link_error = None
 
         self._decoder = FrameDecoder()
         self._clock.reset()
@@ -185,6 +218,79 @@ class SerialManager:
             if not confirmed:
                 print(f"[Serial] Warning: baud switch to {baud_rate} not confirmed — remaining at {self.current_baud}")
 
+        # Started only after any baud switch, so no HB is ever sent at a
+        # rate the firmware is not listening on.
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, daemon=True, name="serial-heartbeat",
+        )
+        self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self):
+        while not self._stop_event.wait(self.HEARTBEAT_INTERVAL_S):
+            self._write(b"HB\n", "HB", quiet=True)
+
+    def _event(self, event: str, detail: str):
+        if self.on_event is not None:
+            try:
+                self.on_event(event, detail)
+            except Exception as e:
+                print(f"[Serial] on_event failed: {e}")
+
+    def _set_fault(self, kind: str, message: str):
+        prev = self.firmware_fault
+        self.firmware_fault = {"kind": kind, "message": message, "at": time.time()}
+        if prev is None or prev["kind"] != kind or prev["message"] != message:
+            print(f"[Serial] FIRMWARE FAULT ({kind}): {message}")
+            self._event("FIRMWARE_FAULT", f"{kind}: {message}")
+
+    def clear_fault(self):
+        self.firmware_fault = None
+
+    @property
+    def telemetry_age_s(self) -> Optional[float]:
+        if self.last_sample_monotonic is None:
+            return None
+        return time.monotonic() - self.last_sample_monotonic
+
+    def _drain(self, ser: serial.Serial) -> bool:
+        """flush(), but bounded -- see the module docstring."""
+        deadline = time.monotonic() + self.DRAIN_TIMEOUT_S
+        while True:
+            try:
+                if not ser.out_waiting:
+                    return True
+            except Exception:
+                return False
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+
+    def _write(self, data: bytes, label: str, ser: Optional[serial.Serial] = None,
+               quiet: bool = False) -> bool:
+        """The only way bytes reach the port. Returns False instead of
+        blocking when the device stops accepting data."""
+        ser = ser or self._serial
+        if not (ser and ser.is_open):
+            return False
+        if not self._write_lock.acquire(timeout=2.0):
+            if not quiet:
+                print(f"[Serial] Write skipped ({label}): port busy")
+            return False
+        try:
+            ser.write(data)
+            if not self._drain(ser):
+                if not quiet:
+                    print(f"[Serial] Warning ({label}): device did not take the data "
+                          f"within {self.DRAIN_TIMEOUT_S}s")
+                return False
+            return True
+        except serial.SerialException as e:   # includes SerialTimeoutException
+            if not quiet:
+                print(f"[Serial] Write error ({label}): {e}")
+            return False
+        finally:
+            self._write_lock.release()
+
     def _wait_for_ready(self, timeout_s: float = 12.0):
         """Blocks (in a worker thread) reading raw lines until the firmware's
         'ESC Armed' readiness message appears, or timeout_s elapses. Falls
@@ -205,6 +311,9 @@ class SerialManager:
             if raw.startswith("BOARD="):
                 self.board_info = raw
                 print(f"[Serial] {raw}")
+                continue
+            if raw.startswith("IMU not detected"):
+                self._set_fault("imu", raw)
                 continue
             if "ESC Armed" in raw:
                 seen_armed = True
@@ -240,11 +349,7 @@ class SerialManager:
             except queue.Empty:
                 break
 
-        try:
-            self._serial.write(cmd)
-            self._serial.flush()
-        except serial.SerialException as e:
-            print(f"[Serial] Write error (CONFIG): {e}")
+        if not self._write(cmd, "CONFIG"):
             return False, self.confirmed_thr_min, self.confirmed_thr_max
 
         deadline = time.time() + timeout_s
@@ -287,11 +392,7 @@ class SerialManager:
             except queue.Empty:
                 break
 
-        try:
-            self._serial.write(cmd)
-            self._serial.flush()
-        except serial.SerialException as e:
-            print(f"[Serial] Write error (SR): {e}")
+        if not self._write(cmd, "SR"):
             return False, None
 
         deadline = time.time() + timeout_s
@@ -330,11 +431,7 @@ class SerialManager:
             except queue.Empty:
                 break
 
-        try:
-            self._serial.write(cmd.encode())
-            self._serial.flush()
-        except serial.SerialException as e:
-            print(f"[Serial] Write error ({cmd.strip()}): {e}")
+        if not self._write(cmd.encode(), cmd.strip()):
             return False, None
 
         deadline = time.time() + timeout_s
@@ -386,11 +483,7 @@ class SerialManager:
             except queue.Empty:
                 break
 
-        try:
-            self._serial.write(cmd)
-            self._serial.flush()
-        except serial.SerialException as e:
-            print(f"[Serial] Write error (BAUD): {e}")
+        if not self._write(cmd, "BAUD"):
             return False, None
 
         # Phase 1: catch "BAUD applied: <n>" — still arrives at the OLD baud.
@@ -446,24 +539,33 @@ class SerialManager:
                 pass
         self._broadcast_task = None
 
-        if self._serial and self._serial.is_open:
-            try:
-                self._serial.write(f"{self._current_thr_min}\n".encode())
-                self._serial.flush()
-                time.sleep(0.05)
-                self._serial.close()
-            except Exception:
-                pass
-        self._serial = None
+        ser, self._serial = self._serial, None
+        if ser is not None:
+            # Off the event loop: even bounded, this can take ~1 s on a
+            # device that has stopped taking data.
+            await asyncio.to_thread(self._close_port, ser)
+        # A reconnect clears _stop_event; a thread still alive then would
+        # run a second reader against the new port.
+        for t in (self._reader_thread, self._heartbeat_thread):
+            if t is not None and t.is_alive():
+                await asyncio.to_thread(t.join, 2.0)
         print("[Serial] Disconnected")
 
-    def send_throttle(self, value: int):
-        if self._serial and self._serial.is_open:
+    def _close_port(self, ser: serial.Serial):
+        """THR_MIN first, then close -- and close even if the write fails,
+        or the handle leaks and the next connect cannot open the port."""
+        try:
+            if ser.is_open:
+                self._write(f"{self._current_thr_min}\n".encode(), "disconnect", ser=ser)
+                time.sleep(0.05)
+        finally:
             try:
-                self._serial.write(f"{value}\n".encode())
-                self._serial.flush()
-            except serial.SerialException as e:
-                print(f"[Serial] Write error: {e}")
+                ser.close()
+            except Exception as e:
+                print(f"[Serial] Close error: {e}")
+
+    def send_throttle(self, value: int):
+        self._write(f"{value}\n".encode(), "throttle")
 
     def send_auto_test(self):
         self._send_cmd(b"AUTO_TEST\n", "AUTO_TEST")
@@ -480,13 +582,8 @@ class SerialManager:
         self._send_cmd(b"STOP_HOLD\n", "STOP_HOLD")
 
     def _send_cmd(self, cmd_bytes: bytes, label: str):
-        if self._serial and self._serial.is_open:
-            try:
-                self._serial.write(cmd_bytes)
-                self._serial.flush()
-                print(f"[Serial] Sent: {label}")
-            except serial.SerialException as e:
-                print(f"[Serial] Write error ({label}): {e}")
+        if self._write(cmd_bytes, label):
+            print(f"[Serial] Sent: {label}")
 
     # ── [NEW v9] Telemetry ingestion ─────────────────────────────────────
     def _handle_control_line(self, raw: str, parse_errors: int) -> int:
@@ -520,6 +617,37 @@ class SerialManager:
 
         if raw.startswith("DBG_RPM") or raw.startswith("DBG_TIMING"):
             print(f"[MCU DEBUG] {raw}")
+            return 0
+
+        # [v15] Fault reports from v11+ firmware.
+        if raw.startswith("IMU_FAULT") or raw.startswith("IMU not detected"):
+            self._set_fault("imu", raw)
+            return 0
+        if raw.startswith("FAILSAFE"):
+            self._set_fault("failsafe", raw)
+            return 0
+        if raw.startswith("REJECTED"):
+            print(f"[Serial] {raw}")
+            return 0
+        if raw.startswith("IMU_RECOVERED"):
+            if self.firmware_fault and self.firmware_fault["kind"] == "imu":
+                self.firmware_fault = None
+            print(f"[Serial] {raw}")
+            self._event("FIRMWARE_RECOVERED", raw)
+            return 0
+        # Boot banner mid-session: the board reset (watchdog or a power dip)
+        # and is back on its default range, sampling mode and 115200 baud.
+        if raw.startswith("Initializing IMU"):
+            self._set_fault("reboot", "Arduino rebooted unexpectedly (watchdog reset or "
+                                      "power dip). Reconnect before continuing.")
+            return 0
+        m = re.search(r"Active profile:\s*THR_MIN=(\d+)\s*THR_MAX=(\d+)", raw)
+        if m:
+            self.confirmed_thr_min = int(m.group(1))
+            self.confirmed_thr_max = int(m.group(2))
+            self._current_thr_min = self.confirmed_thr_min
+            return 0
+        if "ESC Armed" in raw or raw.startswith(("Gravity reference", "Arming ESC")):
             return 0
 
         parse_errors += 1
@@ -564,9 +692,19 @@ class SerialManager:
             self._clock.reset_fit()
 
         host_perf = time.perf_counter()
-        mcu_s_last = self._clock.update(
-            f["t_us"], f["sample_index"] + n - 1, host_perf
-        )
+        last_index = f["sample_index"] + n - 1
+        mcu_s_last = self._clock.update(f["t_us"], last_index, host_perf)
+
+        # [v15] The index->time fit assumes samples never stop. Across an
+        # IMU fault the MCU clock runs on while sample_index does not, and
+        # every later sample would be stamped as if the gap never happened.
+        predicted = self._clock.time_for_index(last_index)
+        if predicted is not None and abs(predicted - mcu_s_last) > self.TIMELINE_BREAK_S:
+            self.stats["timeline_breaks"] += 1
+            print(f"[Serial] Sample timeline break of {mcu_s_last - predicted:+.3f}s "
+                  f"— restarting the sample-clock fit")
+            self._clock.reset_fit()
+            mcu_s_last = self._clock.update(f["t_us"], last_index, host_perf)
         self.stats["measured_rate_hz"] = round(self._clock.measured_rate_hz, 3)
 
         scale = g_per_lsb(f["scale_code"])
@@ -616,6 +754,7 @@ class SerialManager:
         can never throttle acquisition or corrupt the log.
         """
         self.last_throttle_us = data.get("throttle")
+        self.last_sample_monotonic = time.monotonic()
 
         self._csv_logger.write(data)
 
@@ -656,7 +795,11 @@ class SerialManager:
                 self.stats["crc_errors"] = self._decoder.crc_errors
 
             except serial.SerialException as e:
+                if self._stop_event.is_set():
+                    break               # our own disconnect closed the port mid-read
                 print(f"[Serial] SerialException: {e}")
+                self.link_error = str(e)
+                self._event("SERIAL_ERROR", str(e))
                 self._stop_event.set()
                 self.is_connected = False
                 break

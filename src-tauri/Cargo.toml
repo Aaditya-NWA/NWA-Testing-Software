@@ -1,6 +1,6 @@
 [package]
 name = "nwa-testing-software"
-version = "1.0.0"
+version = "1.0.1"
 description = "NWA Testing Software — motor/ESC test bench"
 authors = ["NWA"]
 edition = "2021"

@@ -24,13 +24,31 @@ function headers(isPost: boolean): Record<string, string> {
   return h;
 }
 
-async function req(path: string, body?: object | null, forcePost = false) {
+// [v15] Every request is bounded. Without a timeout a backend stuck on the
+// serial port left buttons that "click but do nothing" and a bar that stayed
+// CONNECTED forever. status 0 = timed out / unreachable.
+const DEFAULT_TIMEOUT_MS = 8000;
+const CONNECT_TIMEOUT_MS = 40000;   // the firmware arms for ~11 s; the backend waits up to 12
+
+async function req(path: string, body?: object | null, forcePost = false,
+                   timeoutMs = DEFAULT_TIMEOUT_MS) {
   const isPost = body !== undefined || forcePost;
-  const r = await fetch(`${BASE}${path}`, {
-    method: isPost ? "POST" : "GET",
-    headers: headers(isPost),
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  let r: Response;
+  try {
+    r = await fetch(`${BASE}${path}`, {
+      method: isPost ? "POST" : "GET",
+      headers: headers(isPost),
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctl.signal,
+    });
+  } catch (e) {
+    if (ctl.signal.aborted) throw new ApiError(0, `No response from the backend within ${timeoutMs / 1000} s`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   if (r.status === 401 || r.status === 403) {
     let detail = r.status === 401 ? "Not signed in" : "Not permitted";
     try { detail = (await r.json()).detail || detail; } catch { /* keep default */ }
@@ -68,7 +86,8 @@ export const api = {
   openLogsFolder:       ()                                                    => req("/activity/open_folder",   null, true),
 
   getPorts:             ()                                                    => req("/ports"),
-  connect:              (port: string, baud: number)                          => req("/connect",               { port, baud_rate: baud }),
+  connect:              (port: string, baud: number)                          => req("/connect",               { port, baud_rate: baud }, false, CONNECT_TIMEOUT_MS),
+  clearFirmwareFault:   ()                                                    => req("/firmware_fault/clear",   null, true),
   disconnect:           ()                                                    => req("/disconnect",             null, true),
   // [NEW] Motor profile — pushes THR_MIN/THR_MAX to backend right after connect
   setMotorProfile:      (thr_min: number, thr_max: number)                    => req("/set_motor_profile",      { thr_min, thr_max }),

@@ -14,6 +14,14 @@
 //   BAUD:<rate>             runtime UART switch
 //   AA:<0-7>                anti-alias corner
 //   TIMING:ON|OFF           per-section timing
+//   HB                      host heartbeat (arms the link-loss failsafe)
+//
+// [v11] Fault handling — see "Motor runaway on IMU/link failure" in
+// CLAUDE.md. The ESC is driven at ESC_SAFE_US from the instant it is
+// attached; an IMU that stops answering on I2C stops the motor
+// (IMU_FAULT) instead of freezing loop(); a host that goes silent after
+// sending HB stops the motor (FAILSAFE); and a watchdog resets the board
+// if loop() ever stalls anyway.
 //
 // Telemetry (MCU -> host, BINARY):
 //   AA 55 | type(1) | len(1) | payload(len) | crc16_ccitt(2, LE)
@@ -55,12 +63,15 @@
 #include <Servo.h>
 #include <Wire.h>
 #include <SparkFunLSM6DSO.h>
+#if defined(__AVR__)
+  #include <avr/wdt.h>
+#endif
 
 Servo esc;
 LSM6DSO imu;
 
 // ── Firmware identity ────────────────────────────────────────
-#define FW_VERSION "v10"
+#define FW_VERSION "v11"
 
 #if defined(__AVR_ATmega328P__)
   #define BOARD_ID "AVR-ATmega328P"
@@ -114,6 +125,21 @@ uint8_t aaCode = 0;   // default ODR/4 = 208Hz at 833Hz ODR
 volatile unsigned long pulseDebounceUs = DEBOUNCE_BOOTSTRAP_US;
 
 #define I2C_FAST_MODE 1   // 1 = 400kHz (current), 0 = 100kHz (diagnostic)
+
+// ── [v11] Fault handling ─────────────────────────────────────
+#define ESC_SAFE_US        1000      // pulse the ESC sees from attach() onward
+#define I2C_TIMEOUT_US     10000UL   // longest legitimate transaction is ~3 ms at 100 kHz
+#define IMU_ERR_LIMIT      10        // consecutive failed IMU transactions => IMU_FAULT
+#define IMU_RETRY_MS       1000UL
+#define HOST_TIMEOUT_MS    1500UL    // backend sends HB every 250 ms
+#define LSM6DSO_WHO_AM_I   0x0F
+#define LSM6DSO_ID         0x6C
+
+bool          imuFault       = false;
+uint8_t       imuErrStreak   = 0;
+unsigned long lastImuRetryMs = 0;
+bool          hostLinkArmed  = false;
+unsigned long lastHostMs     = 0;
 
 volatile int           pulseCount    = 0;
 volatile unsigned long lastPulseTime = 0;
@@ -369,32 +395,59 @@ static uint8_t fifoBuf[BURST_WORDS * 7];
 // How many unread words the FIFO holds, and whether it overran.
 static uint16_t fifoDepth() {
   uint8_t s[2];
-  if (imu.readMultipleRegisters(s, REG_FIFO_STATUS1, 2) != IMU_SUCCESS) return 0;
+  if (imu.readMultipleRegisters(s, REG_FIFO_STATUS1, 2) != IMU_SUCCESS) {
+    if (imuErrStreak < 255) imuErrStreak++;
+    return 0;
+  }
+  imuErrStreak = 0;
   if (s[1] & 0x40) pendingFlags |= FLAG_FIFO_OVERRUN;   // FIFO_OVR_IA
   return (uint16_t)(((uint16_t)(s[1] & 0x03) << 8) | s[0]);
 }
 
-void setup() {
-  Serial.begin(115200);
-  while (!Serial);
+// [v11] Clock SCL until a device holding SDA low lets go, then send a
+// STOP. A board reset does not power-cycle the IMU, so a sensor stuck
+// mid-transaction otherwise keeps the bus dead until the USB is pulled.
+// Pins are only ever pulled low or released, never driven high.
+static void i2cBusRecover() {
+  pinMode(SDA, INPUT_PULLUP);
+  pinMode(SCL, INPUT_PULLUP);
+  delayMicroseconds(10);
+  for (uint8_t i = 0; i < 16 && digitalRead(SDA) == LOW; i++) {
+    digitalWrite(SCL, LOW); pinMode(SCL, OUTPUT);
+    delayMicroseconds(5);
+    pinMode(SCL, INPUT_PULLUP);
+    delayMicroseconds(5);
+  }
+  digitalWrite(SDA, LOW); pinMode(SDA, OUTPUT);
+  delayMicroseconds(5);
+  pinMode(SDA, INPUT_PULLUP);
+  delayMicroseconds(5);
+}
 
-  esc.attach(9);
-
-  pinMode(2, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(2), rpmISR, FALLING);
-
-  Serial.println(F("Initializing IMU..."));
+static void i2cStart() {
   Wire.begin();
 #if I2C_FAST_MODE
   Wire.setClock(400000);
 #else
   Wire.setClock(100000);
 #endif
-  if (!imu.begin()) {
-    Serial.println(F("IMU not detected!"));
-    while (1);
-  }
+#if defined(__AVR__)
+  // Default is no timeout at all: one glitch and loop() never returns.
+  Wire.setWireTimeout(I2C_TIMEOUT_US, true);
+  Wire.clearWireTimeoutFlag();
+#endif
+}
+
+// Probe and configure the sensor. Checks WHO_AM_I itself because the
+// library's begin() reports success for any readable ID.
+static bool imuConfigure() {
+  uint8_t id = 0;
+  if (!imu.begin()) return false;
+  if (imu.readRegister(&id, LSM6DSO_WHO_AM_I) != IMU_SUCCESS || id != LSM6DSO_ID) return false;
   imu.initialize(BASIC_SETTINGS);
+#if defined(__AVR__)
+  wdt_reset();     // ~25 transactions so far; keep margin if they are timing out
+#endif
 
   // [NEW v9] Sensor configuration, in dependency order.
   imu.setAccelRange(4);                       // ±4g -> 0.122 mg/LSB
@@ -402,6 +455,42 @@ void setup() {
   imu.setBlockDataUpdate(true);               // no MSB/LSB tearing
   imu.setIncrement(true);                     // required for burst reads
   imu.writeRegister(REG_CTRL2_G, 0x00);       // gyro powered down (was on, never read)
+#if defined(__AVR__)
+  if (Wire.getWireTimeoutFlag()) { Wire.clearWireTimeoutFlag(); return false; }
+#endif
+  return true;
+}
+
+void setup() {
+#if defined(__AVR__)
+  MCUSR = 0;
+  wdt_disable();
+#endif
+
+  // [v11] Pulse width BEFORE attach. Servo's constructor defaults the
+  // channel to 1500 µs (50% on a 1000–2000 ESC) and attach() starts
+  // emitting it at once — the motor used to surge for ~2.5 s on every
+  // connect, and forever if setup() stalled on the IMU.
+  esc.writeMicroseconds(ESC_SAFE_US);
+  esc.attach(9);
+
+  Serial.begin(115200);
+  while (!Serial);
+
+  pinMode(2, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(2), rpmISR, FALLING);
+
+  Serial.println(F("Initializing IMU..."));
+  i2cBusRecover();
+  i2cStart();
+  while (!imuConfigure()) {
+    // ESC stays at ESC_SAFE_US throughout; nothing here can spin the motor.
+    Serial.println(F("IMU not detected! Motor held at idle. Check IMU wiring/power; retrying..."));
+    delay(1000);
+    Wire.end();
+    i2cBusRecover();
+    i2cStart();
+  }
 
   delay(2000);
 
@@ -420,7 +509,7 @@ void setup() {
 
   // ESC arming — DO NOT REMOVE
   Serial.println(F("Arming ESC..."));
-  esc.writeMicroseconds(1000);
+  esc.writeMicroseconds(ESC_SAFE_US);
   delay(8000);
   esc.writeMicroseconds(THR_MIN);
   delay(500);
@@ -432,11 +521,48 @@ void setup() {
   Serial.print(F(" AA_CODE=")); Serial.print(aaCode);
   Serial.print(F(" BURST=")); Serial.println(burstWords);
 
-  Serial.println(F("ESC Armed. Commands: throttle µs | AUTO_TEST | STOP_TEST | THROTTLE_HOLD:<us>,<hold_ms> | STOP_HOLD | CONFIG:<min>,<max> | SR:DEFAULT|416|833 | BAUD:<rate> | AA:<0-7> | TIMING:ON|OFF"));
+  Serial.println(F("ESC Armed. Commands: throttle µs | AUTO_TEST | STOP_TEST | THROTTLE_HOLD:<us>,<hold_ms> | STOP_HOLD | CONFIG:<min>,<max> | SR:DEFAULT|416|833 | BAUD:<rate> | AA:<0-7> | TIMING:ON|OFF | HB"));
   Serial.print(F("Active profile: THR_MIN=")); Serial.print(THR_MIN);
   Serial.print(F(" THR_MAX=")); Serial.println(THR_MAX);
 
   lastRPMTime = millis();
+
+#if defined(__AVR__)
+  // Last, so the 8 s arming delay above cannot trip it. A stalled loop()
+  // resets the board, and setup() then holds the ESC at ESC_SAFE_US.
+  wdt_enable(WDTO_1S);
+#endif
+}
+
+// ── [v11] IMU fault: stop the motor, keep retrying the sensor ─
+static void enterImuFault() {
+  imuFault = true;
+  resetAutoTest();
+  resetThrottleHold();
+  throttle = THR_MIN;
+  esc.writeMicroseconds(THR_MIN);
+  batchCount = 0;
+  lastImuRetryMs = millis();
+  Serial.println(F("IMU_FAULT: IMU stopped responding on I2C - motor stopped. Retrying."));
+}
+
+static void tryImuRecover() {
+  lastImuRetryMs = millis();
+#if defined(__AVR__)
+  wdt_reset();
+#endif
+  Wire.end();
+  i2cBusRecover();
+  i2cStart();
+  if (!imuConfigure()) return;
+
+  uint8_t aa = aaCode;                 // applySamplingMode() picks its own corner
+  applySamplingMode(samplingMode);
+  applyAntiAlias(aa);
+  startFifo();
+  imuErrStreak = 0;
+  imuFault     = false;
+  Serial.println(F("IMU_RECOVERED: IMU responding again. Throttle stays at idle until commanded."));
 }
 
 #define CMD_BUF_SIZE 48
@@ -467,6 +593,15 @@ bool parseConfig(const char *args) {
 }
 
 static void handleCommand(char *cmd) {
+  if (strcmp(cmd, "HB") == 0) {
+    hostLinkArmed = true;
+    return;
+  }
+  if (imuFault && (strcmp(cmd, "AUTO_TEST") == 0 || strncmp(cmd, "THROTTLE_HOLD:", 14) == 0)) {
+    Serial.println(F("REJECTED: IMU_FAULT"));
+    return;
+  }
+
   if (strcmp(cmd, "AUTO_TEST") == 0) {
     resetThrottleHold();
     resetAutoTest();
@@ -591,6 +726,7 @@ static void pollSerialCommands() {
     if (c == '\n' || c == '\r') {
       if (cmdLen > 0) {
         cmdBuf[cmdLen] = '\0';
+        lastHostMs = millis();
         handleCommand(cmdBuf);
         cmdLen = 0;
       }
@@ -677,6 +813,7 @@ static void serviceFifo() {
     uint32_t t0 = timingEnabled ? micros() : 0;
     if (imu.readMultipleRegisters(fifoBuf, REG_FIFO_DATA_OUT_TAG,
                                   (uint8_t)(want * 7)) != IMU_SUCCESS) {
+      if (imuErrStreak < 255) imuErrStreak++;
       return;
     }
     if (timingEnabled) tI2cUs += (micros() - t0);
@@ -721,9 +858,23 @@ static void serviceFifo() {
 }
 
 void loop() {
+#if defined(__AVR__)
+  wdt_reset();
+#endif
 
   // ── Serial command input ────────────────────────────────────
   pollSerialCommands();
+
+  // ── [v11] Host link-loss failsafe (armed by the first HB) ────
+  if (hostLinkArmed && (millis() - lastHostMs) > HOST_TIMEOUT_MS) {
+    hostLinkArmed = false;
+    if (throttle != THR_MIN || autoTestRunning || throttleHoldRunning) {
+      resetAutoTest();
+      resetThrottleHold();
+      throttle = THR_MIN;
+      Serial.println(F("FAILSAFE: no command from host for 1.5 s - motor stopped"));
+    }
+  }
 
   // ── AUTO TEST logic ──────────────────────────────────────────
   if (autoTestRunning) {
@@ -813,6 +964,8 @@ void loop() {
     }
   }
 
+  if (imuFault) throttle = THR_MIN;
+
   // Apply throttle — [v7] rate-limited to the ESC's real 50Hz refresh.
   unsigned long nowServoUs = micros();
   if (nowServoUs - lastServoWriteUs >= SERVO_WRITE_PERIOD_US) {
@@ -900,10 +1053,16 @@ void loop() {
   }
 
   unsigned long nowFifoUs = micros();
-  if (timeReached(nowFifoUs, i2cQuietUntilUs) &&
-      timeReached(nowFifoUs, lastFifoServiceUs + FIFO_SERVICE_US)) {
+  if (imuFault) {
+    if (currentTime - lastImuRetryMs >= IMU_RETRY_MS) tryImuRecover();
+  } else if (timeReached(nowFifoUs, i2cQuietUntilUs) &&
+             timeReached(nowFifoUs, lastFifoServiceUs + FIFO_SERVICE_US)) {
     lastFifoServiceUs = nowFifoUs;
     serviceFifo();
+#if defined(__AVR__)
+    Wire.clearWireTimeoutFlag();     // a timed-out read already counted in imuErrStreak
+#endif
+    if (imuErrStreak >= IMU_ERR_LIMIT) enterImuFault();
   }
 
   static unsigned long lastFlushMs = 0;

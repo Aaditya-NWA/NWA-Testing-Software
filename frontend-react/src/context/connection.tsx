@@ -31,7 +31,7 @@
 import React, {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
-import { api } from "../hooks/useApi";
+import { api, ApiError } from "../hooks/useApi";
 import { ConnectionStatus, SamplingRateId } from "../types";
 import {
   MotorProfile, BUILTIN_MOTOR_PROFILES, useMotorProfiles,
@@ -52,6 +52,14 @@ export const SAMPLING_RATES: SamplingRateOption[] = [
 export const BAUD_RATES = [9600, 57600, 115200, 230400, 460800, 921600];
 
 const EXPECTED_PROTOCOL = "binary-v9";
+// [v15] First firmware that stops the motor on an IMU fault or a silent host.
+const MIN_SAFE_FW = 11;
+
+export interface FirmwareFault {
+  kind: "imu" | "failsafe" | "reboot" | string;
+  message: string;
+  at: number;
+}
 
 interface ConnectionState {
   status: ConnectionStatus;
@@ -80,6 +88,14 @@ interface ConnectionState {
 
   boardInfo: string | null;
   firmwareWarning: string | null;
+
+  // [v15] Link health, mirrored from /status.
+  telemetryStalled: boolean;
+  telemetryAgeS: number | null;
+  firmwareFault: FirmwareFault | null;
+  linkError: string | null;
+  backendUnresponsive: boolean;
+  dismissFirmwareFault: () => Promise<void>;
 
   logging: boolean;
   logFile: string | null;
@@ -122,6 +138,12 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   const [boardInfo, setBoardInfo] = useState<string | null>(null);
   const [firmwareWarning, setFirmwareWarning] = useState<string | null>(null);
 
+  const [telemetryStalled, setTelemetryStalled] = useState(false);
+  const [telemetryAgeS, setTelemetryAgeS] = useState<number | null>(null);
+  const [firmwareFault, setFirmwareFault] = useState<FirmwareFault | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const [backendUnresponsive, setBackendUnresponsive] = useState(false);
+
   const [logging, setLogging] = useState(false);
   const [logFile, setLogFile] = useState<string | null>(null);
 
@@ -151,12 +173,19 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   const checkFirmware = useCallback((s: any) => {
     setBoardInfo(s.board_info ?? null);
     const proto = s.firmware_protocol;
+    const fw = /FW=v(\d+)/.exec(s.board_info ?? "");
     if (proto && proto !== "unknown" && proto !== EXPECTED_PROTOCOL) {
       setFirmwareWarning(
         `This board is running ${proto} firmware, not ${EXPECTED_PROTOCOL}. ` +
         `It will keep working in compatibility mode, but sampling is limited to ` +
         `~220 Hz, timestamps are host arrival times rather than MCU times, and ` +
         `the data is aliased. Reflash the board before recording measurements.`
+      );
+    } else if (fw && Number(fw[1]) < MIN_SAFE_FW) {
+      setFirmwareWarning(
+        `This board is running firmware v${fw[1]}, which cannot stop the motor by ` +
+        `itself if the IMU or the USB link fails, and surges the ESC to 50% on ` +
+        `every connect. Reflash nwa_testing_software.ino (v${MIN_SAFE_FW}+) before testing.`
       );
     } else {
       setFirmwareWarning(null);
@@ -166,6 +195,11 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   const refreshFromBackend = useCallback(async () => {
     try {
       const s = await api.getStatus();
+      setBackendUnresponsive(false);
+      setFirmwareFault(s.firmware_fault ?? null);
+      setLinkError(s.link_error ?? null);
+      setTelemetryStalled(!!s.telemetry_stalled);
+      setTelemetryAgeS(s.telemetry_age_s ?? null);
       if (!s.connected) {
         setStatus(st => (st === "connecting" ? st : "disconnected"));
         return;
@@ -191,8 +225,17 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
           `Disconnect and reconnect with the intended motor before running a test.`
         );
       }
-    } catch { /* backend not running or signed out — leave state alone */ }
+    } catch (e) {
+      // Signed out / not permitted: leave state alone. A timeout is different —
+      // the backend is up but not answering, which the operator must see.
+      if (e instanceof ApiError && e.status === 0) setBackendUnresponsive(true);
+    }
   }, [motorProfiles, checkFirmware]);
+
+  const dismissFirmwareFault = useCallback(async () => {
+    try { await api.clearFirmwareFault(); } catch { /* next poll re-reports it */ }
+    setFirmwareFault(null);
+  }, []);
 
   const adoptedRef = useRef(false);
   useEffect(() => {
@@ -275,13 +318,18 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     motorProfiles, motorProfileId, setMotorProfileId, motorProfile,
     confirmedRange, profileMismatch,
     boardInfo, firmwareWarning,
+    telemetryStalled, telemetryAgeS, firmwareFault, linkError, backendUnresponsive,
+    dismissFirmwareFault,
     logging, logFile, setLogging, setLogFile,
     connect, disconnect, refreshFromBackend,
   }), [
     status, connected, ports, port, refreshPorts, baud, activeBaud, baudSwitchWarning,
     samplingRateId, samplingRate, samplingRateAckError, pairingWarning,
     motorProfiles, motorProfileId, motorProfile, confirmedRange, profileMismatch,
-    boardInfo, firmwareWarning, logging, logFile, connect, disconnect, refreshFromBackend,
+    boardInfo, firmwareWarning,
+    telemetryStalled, telemetryAgeS, firmwareFault, linkError, backendUnresponsive,
+    dismissFirmwareFault,
+    logging, logFile, connect, disconnect, refreshFromBackend,
   ]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

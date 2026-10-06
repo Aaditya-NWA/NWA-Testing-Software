@@ -90,6 +90,7 @@ jobs:
           python test_step_test.py
           python test_motor_profiles.py
           python test_auth.py
+          python test_link_safety.py
 
       - name: Frontend test suites
         working-directory: frontend-react

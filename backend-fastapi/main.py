@@ -44,13 +44,44 @@ from websocket_manager import WebSocketManager
 ws_manager = WebSocketManager()
 csv_logger = CSVLogger()
 serial_mgr = SerialManager(ws_manager=ws_manager, csv_logger=csv_logger)
+serial_mgr.on_event = lambda event, detail: activity_log.log(event, detail)
+
+# [v15] No sample for this long while connected = the run cannot be observed.
+TELEMETRY_STALL_S = 2.0
+_stall = {"active": False}
+
+
+async def _watch_telemetry():
+    """Stop a run whose telemetry has stopped. Whatever froze the stream
+    (a hung board, an IMU fault, a dead link), a Step Test must not keep
+    ramping into it, and the motor is commanded down in case the board can
+    still hear us."""
+    while True:
+        await asyncio.sleep(0.5)
+        age = serial_mgr.telemetry_age_s if serial_mgr.is_connected else None
+        stalled = age is not None and age > TELEMETRY_STALL_S
+        if stalled and not _stall["active"]:
+            _stall["active"] = True
+            activity_log.log(
+                "TELEMETRY_STALL",
+                f"no samples for {age:.1f}s at {serial_mgr.last_throttle_us}us; "
+                f"step test cancelled, throttle -> {active_profile['thr_min']}us",
+            )
+            await _cancel_step_test()
+            await asyncio.to_thread(serial_mgr.send_throttle, active_profile["thr_min"])
+        elif not stalled and _stall["active"]:
+            _stall["active"] = False
+            if age is not None:
+                activity_log.log("TELEMETRY_RESUMED", "")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     motor_profile_store.ensure_seeded()
     activity_log.log("APP_START", f"backend up, data root={app_paths.app_root()}")
+    stall_task = asyncio.create_task(_watch_telemetry())
     yield
+    stall_task.cancel()
     # [NEW v10] Cancel before the port closes — otherwise the sequencer
     # keeps writing THROTTLE_HOLD commands into a dead serial handle.
     await _cancel_step_test()
@@ -484,7 +515,7 @@ def set_throttle(req: ThrottleRequest, sess: auth.Session = Depends(needs_hardwa
 @app.post("/emergency_stop")
 async def emergency_stop(sess: auth.Session = Depends(needs_hardware)):
     await _cancel_step_test()
-    serial_mgr.send_throttle(active_profile["thr_min"])
+    await asyncio.to_thread(serial_mgr.send_throttle, active_profile["thr_min"])
     activity_log.log("ESTOP", f"throttle -> {active_profile['thr_min']}us", sess)
     return {"status": "emergency_stop"}
 
@@ -558,7 +589,7 @@ async def stop_throttle_hold(sess: auth.Session = Depends(needs_control)):
     """Abort a running throttle hold sequence."""
     activity_log.log("STEP_TEST", "STOP single", sess)
     await _cancel_step_test()
-    serial_mgr.send_stop_hold()
+    await asyncio.to_thread(serial_mgr.send_stop_hold)
     return {"status": "throttle_hold_stopped"}
 
 
@@ -583,7 +614,7 @@ async def _ramp_throttle(from_us: int, to_us: int) -> int:
     the throttle actually reached (always to_us, unless cancelled)."""
     current = from_us
     if current == to_us:
-        serial_mgr.send_throttle(current)
+        await asyncio.to_thread(serial_mgr.send_throttle, current)
         return current
     step = _RAMP_STEP_US if to_us > from_us else -_RAMP_STEP_US
     while current != to_us:
@@ -591,7 +622,7 @@ async def _ramp_throttle(from_us: int, to_us: int) -> int:
         current += step
         if (step > 0 and current > to_us) or (step < 0 and current < to_us):
             current = to_us
-        serial_mgr.send_throttle(current)
+        await asyncio.to_thread(serial_mgr.send_throttle, current)
         _step_test["current_us"] = current
     return current
 
@@ -703,9 +734,17 @@ async def start_step_test(
 async def stop_step_test(sess: auth.Session = Depends(needs_control)):
     activity_log.log("STEP_TEST", "STOP", sess)
     await _cancel_step_test()
-    serial_mgr.send_stop_hold()
+    await asyncio.to_thread(serial_mgr.send_stop_hold)
     _step_test.update(phase="aborted", message="Stopped.")
     return {"status": "step_test_stopped"}
+
+
+@app.post("/firmware_fault/clear")
+def clear_firmware_fault(sess: auth.Session = Depends(needs_hardware)):
+    fault = serial_mgr.firmware_fault
+    serial_mgr.clear_fault()
+    activity_log.log("FAULT_DISMISSED", fault["kind"] if fault else "-", sess)
+    return {"status": "cleared"}
 
 
 @app.get("/step_test_status")
@@ -749,6 +788,16 @@ def get_status(sess: auth.Session = Depends(needs_login)):
         "active_baud": serial_mgr.current_baud,
         "board_info": serial_mgr.board_info,
         "firmware_protocol": serial_mgr.firmware_protocol,
+        # [v15] Link health — what the dashboard needs to stop showing a
+        # steady CONNECTED over frozen numbers.
+        "telemetry_age_s": (
+            round(serial_mgr.telemetry_age_s, 2)
+            if serial_mgr.is_connected and serial_mgr.telemetry_age_s is not None
+            else None
+        ),
+        "telemetry_stalled": _stall["active"],
+        "firmware_fault": serial_mgr.firmware_fault,
+        "link_error": serial_mgr.link_error,
         # [NEW v9] Acquisition health. Every one of these was previously
         # either invisible or silently discarded.
         "acquisition": {
@@ -823,8 +872,13 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
         await websocket.close(code=1008)
         return
     await ws_manager.connect(websocket)
+    # [v15] Must RECEIVE, not sleep: only a receive observes the client
+    # leaving. The old sleep loop never ended, and uvicorn holds the lifespan
+    # teardown (the THR_MIN write) until every handler has finished.
     try:
         while True:
-            await asyncio.sleep(0.5)
-    except WebSocketDisconnect:
+            await websocket.receive_text()
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
         ws_manager.disconnect(websocket)

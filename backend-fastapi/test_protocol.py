@@ -236,6 +236,31 @@ else:
                  "AA applied", "TIMING applied"]:
         check("ack string present: " + repr(_tok), _tok in _src)
 
+    # [v15] Fault reporting: serial_manager matches these prefixes.
+    for _tok in ["IMU_FAULT", "IMU_RECOVERED", "FAILSAFE", "IMU not detected",
+                 "Initializing IMU", "REJECTED: IMU_FAULT"]:
+        check("fault string present: " + repr(_tok), _tok in _src)
+    check("firmware handles the HB heartbeat", 'strcmp(cmd, "HB")' in _src)
+
+    _sm_py = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "serial_manager.py")
+    with open(_sm_py, encoding="utf-8") as _fh:
+        _m = _re.search(r"HEARTBEAT_INTERVAL_S\s*=\s*([\d.]+)", _fh.read())
+    _hb_ms = float(_m.group(1)) * 1000 if _m else None
+    _host_to = _define("HOST_TIMEOUT_MS")
+    check("firmware failsafe timeout spans >= 4 heartbeat intervals",
+          _hb_ms is not None and _host_to is not None and _host_to >= 4 * _hb_ms,
+          f"HOST_TIMEOUT_MS={_host_to} heartbeat={_hb_ms}ms")
+
+    # The 1500 µs boot surge: the pulse width must be set BEFORE attach().
+    _setup = _src[_src.find("void setup()"):]
+    _pre, _att = _setup.find("esc.writeMicroseconds(ESC_SAFE_US)"), _setup.find("esc.attach(")
+    check("ESC pulse is set before esc.attach()", 0 <= _pre < _att, f"write@{_pre} attach@{_att}")
+    check("I2C has a timeout (Wire waits forever by default)", "setWireTimeout(" in _src)
+    check("no while(1) hang left in the sketch", not _re.search(r"while\s*\(\s*1\s*\)", _src))
+    _wdt, _arm = _setup.find("wdt_enable("), _setup.find("delay(8000)")
+    check("watchdog enabled only after the 8 s arming delay", 0 <= _arm < _wdt,
+          f"arm@{_arm} wdt@{_wdt}")
+
     _main_py = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "main.py")
     with open(_main_py, encoding="utf-8") as _fh:
         _main_src = _fh.read()

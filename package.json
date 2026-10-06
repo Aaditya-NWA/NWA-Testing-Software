@@ -1,6 +1,6 @@
 {
   "name": "nwa-testing-software",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Desktop shell — Tauri CLI lives here, the React app lives in frontend-react/",
   "scripts": {

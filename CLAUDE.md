@@ -90,9 +90,17 @@ cd frontend-react; npm run test:throttle
 # that it really starts, answers /health, refuses a bad shutdown token,
 # shuts down gracefully, and exits 3 on a busy port
 cd backend-fastapi; python test_deployment.py
+
+# Backend [v15] — link safety: writes to a device that stopped taking data
+# return (bounded) instead of hanging, Disconnect still closes a stuck port
+# without blocking the event loop, the heartbeat goes out, firmware fault
+# lines are recognised, a telemetry stall commands the motor down, and —
+# against a REAL uvicorn — app shutdown after a /ws session still reaches
+# the lifespan teardown (APP_STOP). Fails on the pre-v15 /ws handler.
+cd backend-fastapi; python test_link_safety.py
 ```
 
-All nine exit non-zero on failure. The three frontend suites share one
+All ten exit non-zero on failure. The three frontend suites share one
 runner (`run_test.mjs <name>`) — they were three copy-pasted files until v13.
 
 **None of these ship.** No app module imports a test, they appear nowhere in
@@ -545,7 +553,13 @@ Changing either side without the other breaks the link silently.
   `STOP_TEST`, `THROTTLE_HOLD:<us>,<hold_ms>`, `STOP_HOLD`,
   `CONFIG:<min>,<max>`, `SR:DEFAULT|416|833`, `BAUD:<rate>`,
   and **[v9]** `AA:<0-7>` (anti-alias corner) and `TIMING:ON|OFF`
-  (per-section µs instrumentation).
+  (per-section µs instrumentation), and **[v15 / FW v11]** `HB` (host
+  heartbeat, every 250 ms; arms the firmware's link-loss failsafe).
+- **[v15 / FW v11] Fault lines** (firmware → host), matched by prefix in
+  `serial_manager._handle_control_line` and asserted by `test_protocol.py`:
+  `IMU_FAULT`, `IMU_RECOVERED`, `IMU not detected`, `FAILSAFE`,
+  `REJECTED: IMU_FAULT`, and the boot banner `Initializing IMU` (seen
+  mid-session = the board rebooted).
 - **Ack strings** are matched by regex/substring in `serial_manager.py`
   (`ESC Armed`, `Active profile: THR_MIN=x THR_MAX=y`, `CONFIG applied:`,
   `SR applied`, `BAUD applied`, `READY`, `AA applied`, `TIMING applied`, and the
@@ -653,6 +667,99 @@ incomplete** — float formatting accounts for at most ~1 ms of a measured 4.46 
 per-sample budget. v9 removes the plateau's actual causes (see RESEARCH.md §6
 and the "Implementation status" section there).
 
+## Motor runaway on IMU/link failure — FIXED in v15 / firmware v11
+
+**Incident, 2026-10-06** (screen recordings + `activity-2026-10-06.txt`, two
+laptops). Within seconds of spin-up, sometimes within ~60 ms of the first
+movement, telemetry froze, the motor held its last speed, and no command
+reached it. Disconnect worked. Reconnect made it *worse*: the motor surged
+and stayed there. Only pulling the USB stopped it. Every reconnect was logged
+`CONNECT … board=-`, meaning `setup()` never reached the boot banner.
+
+**The chain, all of it in our code except the trigger:**
+
+1. *Trigger (hardware, not ours):* the LSM6DSO stopped answering on I2C
+   when the motor started — noise from the motor/ESC, or a failing
+   sensor/connector. It stayed dead until power-cycled; a board reset does
+   not power-cycle the IMU.
+2. **The AVR Wire library has no timeout by default** (`twi_timeout_us = 0` in
+   core 1.8.8). `loop()` spun forever inside an I2C read. Servo pulses come
+   from a Timer1 interrupt, so the ESC kept receiving the last throttle.
+3. **`esc.attach()` ran before any pulse width was set.** Servo's constructor
+   defaults the channel to `DEFAULT_PULSE_WIDTH` = **1500 µs, 50% on a
+   1000–2000 ESC**, and `attach()` starts emitting it immediately. The
+   "ramps up then down on every connect" behaviour everyone was used to was
+   this bug — ~2.5 s at 50% until `setup()` reached its arming write. With the
+   IMU dead, `setup()` hung (or sat in `while (1)` after "IMU not detected!")
+   *before* that write, so 50% held forever.
+4. **No failsafe and no watchdog**, so nothing on the board could notice.
+5. Host side, latent rather than triggered that day: pyserial's Windows
+   `flush()` has no timeout. E-Stop, Disconnect and the Step Test ramp wrote
+   on the event loop, so a board that stopped taking data could freeze the
+   whole backend. The dashboard had no request timeouts and kept showing
+   CONNECTED over frozen numbers. And app close skipped the THR_MIN write
+   on every connected session — see the `/ws` note under "Shutdown is the
+   safety property".
+
+**What changed.**
+
+*Firmware v11:*
+- `esc.writeMicroseconds(ESC_SAFE_US)` **before** `attach()`.
+- `Wire.setWireTimeout(10 ms, reset)`, and SCL clocking to release a stuck
+  bus before every (re)init.
+- `setup()` retries the IMU forever with the ESC at 1000 µs instead of
+  `while (1)`. It checks WHO_AM_I itself, because the library's `begin()`
+  reports success for any ID it can read.
+- 10 consecutive failed reads → `IMU_FAULT`: motor to THR_MIN, retry every
+  1 s. `AUTO_TEST`/`THROTTLE_HOLD` are refused until `IMU_RECOVERED`, and the
+  throttle stays at idle until the operator raises it again.
+- `HB` arms a 1.5 s link-loss failsafe (`FAILSAFE`). It arms only on the first
+  `HB`, so a Serial Monitor session never trips it.
+- A 1 s watchdog, enabled after the 8 s arming delay.
+
+*Backend:*
+- Every write goes through `SerialManager._write()`: serialised, with the
+  drain bounded to 0.5 s.
+- Port open/close and every write from an async endpoint run in
+  `asyncio.to_thread`.
+- Disconnect closes the port even if the THR_MIN write fails.
+- A heartbeat thread sends `HB`.
+- Fault lines become `firmware_fault` and an activity-log line.
+- `_watch_telemetry` treats more than 2 s without samples as a stall: it
+  cancels any Step Test, sends THR_MIN once, and logs `TELEMETRY_STALL`.
+- `/status` reports `telemetry_age_s`, `telemetry_stalled`, `firmware_fault`
+  and `link_error`. The reader's SerialException text, previously visible
+  only on a console the packaged app does not keep, now goes to the activity
+  log.
+- **Sample-clock gaps (found on the first v11 bench run).** `SampleClock` fits
+  sample index against MCU time with one cumulative line. Across an IMU fault
+  the MCU clock runs on while `sample_index` does not. Every later sample was
+  stamped as if the gap never happened (~38 s vanished), timestamps ran
+  backwards, and the fitted rate fell to ~141 Hz for the rest of the run — so
+  `McuMicros`, and every spectrum built on it, came out wrong. A batch whose
+  stamp is more than `TIMELINE_BREAK_S` (50 ms) off the fit now restarts the
+  fit, and `stats.timeline_breaks` counts it. Unreachable before v11, because
+  a dead IMU never recovered.
+
+*Dashboard:*
+- Every request times out (8 s; Connect 40 s).
+- The connection bar shows red alarms for a stall, a firmware fault, a lost
+  link and an unresponsive backend.
+- It warns when the board's `FW=` is below v11.
+- E-Stop's four calls no longer depend on each other.
+
+**The firmware must be reflashed for most of this to exist.** The host half
+works with v10 boards (v10 ignores `HB`, since `atoi("HB")` is 0), but the
+surge, the I2C hang and the missing failsafe are fixed only in the sketch, and
+it cannot be compiled from this repo — compile it in the Arduino IDE first.
+**Watchdog caveat:** genuine Unos run optiboot, which handles a watchdog
+reset. Some old or clone bootloaders reboot-loop on one; if a board does that,
+it needs optiboot burned.
+
+What this does *not* fix is the trigger. With v11 a dead IMU becomes "motor
+stopped, `IMU_FAULT` on screen" instead of a runaway. The sensor wiring,
+grounding and noise are still for the hardware side to find.
+
 ## Login, roles and the activity log [NEW v13]
 
 Three local accounts ship with the application and are identical on all three
@@ -721,14 +828,14 @@ delete dialog has none — stacking them only trains people to click through
 both. The button sits beside the tab bar, so a mis-click ending a bench
 session was a realistic way to lose one.
 
-**Related hazard, pre-existing and NOT introduced here: the firmware has no
-serial-loss failsafe.** There is no watchdog and no serial timeout in the
-`.ino`. The graceful path is safe, but if the backend process is killed —
-crash, Task Manager, sleep — nothing writes `THR_MIN` and the Arduino keeps
-driving its last commanded throttle. Recovery works but is unobvious: opening
-the port triggers a DTR auto-reset, the sketch re-arms in `setup()`, and the
-motor stops. That is ~8.5 s and requires signing in first, so do not "fix" it
-by putting an unauthenticated control on the login screen.
+**Related hazard — FIXED in v15 / firmware v11, but only on a reflashed
+board.** Firmware up to v10 had no serial-loss failsafe: if the backend
+process was killed, nothing wrote `THR_MIN` and the Arduino kept driving its
+last commanded throttle. v11 stops the motor 1.5 s after the backend's
+heartbeat stops, and has a watchdog. A board still on v10 keeps the old
+behaviour, and the connection bar now says so. Do not "fix" anything here by
+putting an unauthenticated control on the login screen. See "Motor runaway on
+IMU/link failure" below.
 
 ### The activity log
 
@@ -986,8 +1093,19 @@ That last one is the dangerous one. See below.
 closing the port, and the FastAPI lifespan teardown is what calls it. So the
 only safe way to stop the backend is to let uvicorn unwind its lifespan —
 `POST /shutdown` sets `SERVER.should_exit`, which does exactly that. Killing
-the process skips all of it and leaves the ESC driving its last commanded
-throttle, because **the firmware still has no serial-loss failsafe**.
+the process skips all of it. On firmware v11+ the heartbeat failsafe then
+stops the motor within ~1.5 s; on v10 and earlier the ESC keeps driving its
+last commanded throttle.
+
+**[FIXED v15] The teardown was being skipped on every connected session.** The
+`/ws` handler looped on `sleep()` and never received, so it never noticed the
+client leave. Uvicorn runs the lifespan teardown only after every handler
+finishes, so once any session had connected, `/shutdown` never reached
+`disconnect_async()` and the shell killed the backend after its 8 s grace —
+silently, with the motor at its last throttle. The activity log showed it as a
+`SHUTDOWN_REQ` with no `APP_STOP` after it. The handler now receives, and
+`run_backend.py` sets `timeout_graceful_shutdown=3` as a backstop.
+`test_link_safety.py` reproduces the hang against a real uvicorn.
 
 Three consequences that must survive any future change:
 
