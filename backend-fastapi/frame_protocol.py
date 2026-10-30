@@ -82,6 +82,18 @@ FLAG_TAG_FALLBACK = 0x04
 # Matches the values in the SparkFun driver's calcAccel().
 _MG_PER_LSB = {2: 0.061, 4: 0.122, 8: 0.244, 16: 0.488}
 
+# [v12] Ranges the firmware's FS: command accepts; 4 is its boot default.
+ACCEL_RANGES_G = (2, 4, 8, 16)
+DEFAULT_ACCEL_RANGE_G = 4
+
+# A raw count this far out is treated as clipped. The sensor saturates at the
+# int16 limits; the margin covers a few counts of offset trim.
+CLIP_COUNTS = 32700
+
+
+def is_clipped(rx: int, ry: int, rz: int) -> bool:
+    return max(abs(rx), abs(ry), abs(rz)) >= CLIP_COUNTS
+
 
 def crc16_ccitt(data: bytes, crc: int = 0xFFFF) -> int:
     """CRC16-CCITT (poly 0x1021, init 0xFFFF), bitwise.

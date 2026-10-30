@@ -25,6 +25,7 @@
     "test:fft": "node run_test.mjs fft",
     "test:plot": "node run_test.mjs plotData",
     "test:throttle": "node run_test.mjs throttle",
-    "test": "npm run test:fft && npm run test:plot && npm run test:throttle"
+    "test:range": "node run_test.mjs accelRange",
+    "test": "npm run test:fft && npm run test:plot && npm run test:throttle && npm run test:range"
   }
 }

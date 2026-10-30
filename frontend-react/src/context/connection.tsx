@@ -36,6 +36,7 @@ import { ConnectionStatus, SamplingRateId } from "../types";
 import {
   MotorProfile, BUILTIN_MOTOR_PROFILES, useMotorProfiles,
 } from "../lib/motorProfiles";
+import { AccelRangeG, DEFAULT_ACCEL_RANGE_G } from "../lib/accelRange";
 
 export interface SamplingRateOption {
   id: SamplingRateId;
@@ -78,6 +79,14 @@ interface ConnectionState {
   samplingRate: SamplingRateOption;
   samplingRateAckError: string | null;
   pairingWarning: string | null;
+
+  // [v12 FW] accelRangeG is the selection; liveAccelRangeG is what the
+  // frames report, i.e. the range samples are actually scaled by.
+  accelRangeG: AccelRangeG;
+  setAccelRangeG: (g: AccelRangeG) => void;
+  liveAccelRangeG: number | null;
+  accelRangeAckError: string | null;
+  clippedSamples: number;
 
   motorProfiles: MotorProfile[];
   motorProfileId: string;
@@ -129,6 +138,11 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
 
   const [samplingRateId, setSamplingRateId] = useState<SamplingRateId>("DEFAULT");
   const [samplingRateAckError, setSamplingRateAckError] = useState<string | null>(null);
+
+  const [accelRangeG, setAccelRangeG] = useState<AccelRangeG>(DEFAULT_ACCEL_RANGE_G);
+  const [liveAccelRangeG, setLiveAccelRangeG] = useState<number | null>(null);
+  const [accelRangeAckError, setAccelRangeAckError] = useState<string | null>(null);
+  const [clippedSamples, setClippedSamples] = useState(0);
 
   const motorProfiles = useMotorProfiles();
   const [motorProfileId, setMotorProfileId] = useState(BUILTIN_MOTOR_PROFILES[0].id);
@@ -209,6 +223,9 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       setLogging(!!s.logging);
       setLogFile(s.log_file || null);
       if (s.confirmed_sampling_rate) setSamplingRateId(s.confirmed_sampling_rate as SamplingRateId);
+      setLiveAccelRangeG(s.accel_range_g ?? null);
+      if ([2, 4, 8, 16].includes(s.accel_range_g)) setAccelRangeG(s.accel_range_g as AccelRangeG);
+      setClippedSamples(s.acquisition?.clipped_samples ?? 0);
       checkFirmware(s);
 
       const min = s.confirmed_thr_min ?? s.active_profile?.thr_min;
@@ -251,6 +268,9 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     setConfirmedRange(null);
     setProfileMismatch(null);
     setSamplingRateAckError(null);
+    setAccelRangeAckError(null);
+    setLiveAccelRangeG(null);
+    setClippedSamples(0);
     setActiveBaud(null);
     setBaudSwitchWarning(null);
     setFirmwareWarning(null);
@@ -290,6 +310,15 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
         setSamplingRateAckError(sr.message || "Arduino did not confirm the sampling rate.");
       }
 
+      // The board boots at the default range on every connect, so the default
+      // sends nothing: a 4 g session is exactly what it was before v12.
+      if (accelRangeG !== DEFAULT_ACCEL_RANGE_G) {
+        const fs = await api.setAccelRange(accelRangeG);
+        if (!fs.confirmed) {
+          setAccelRangeAckError(fs.message || `Arduino did not confirm ±${accelRangeG} g.`);
+        }
+      }
+
       setStatus("connected");
       // Picks up board_info / firmware_protocol, which only exist after the
       // firmware's boot lines have been parsed.
@@ -297,7 +326,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     } catch {
       setStatus("error");
     }
-  }, [port, baud, motorProfile, samplingRateId, refreshFromBackend]);
+  }, [port, baud, motorProfile, samplingRateId, accelRangeG, refreshFromBackend]);
 
   const disconnect = useCallback(async () => {
     try { await api.disconnect(); } catch { /* report via state below */ }
@@ -305,6 +334,9 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     setLogging(false);
     setLogFile(null);
     setSamplingRateAckError(null);
+    setAccelRangeAckError(null);
+    setLiveAccelRangeG(null);
+    setClippedSamples(0);
     setActiveBaud(null);
     setBaudSwitchWarning(null);
     setFirmwareWarning(null);
@@ -315,6 +347,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     status, connected, ports, port, setPort, refreshPorts,
     baud, setBaud, activeBaud, baudSwitchWarning,
     samplingRateId, setSamplingRateId, samplingRate, samplingRateAckError, pairingWarning,
+    accelRangeG, setAccelRangeG, liveAccelRangeG, accelRangeAckError, clippedSamples,
     motorProfiles, motorProfileId, setMotorProfileId, motorProfile,
     confirmedRange, profileMismatch,
     boardInfo, firmwareWarning,
@@ -325,6 +358,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   }), [
     status, connected, ports, port, refreshPorts, baud, activeBaud, baudSwitchWarning,
     samplingRateId, samplingRate, samplingRateAckError, pairingWarning,
+    accelRangeG, liveAccelRangeG, accelRangeAckError, clippedSamples,
     motorProfiles, motorProfileId, motorProfile, confirmedRange, profileMismatch,
     boardInfo, firmwareWarning,
     telemetryStalled, telemetryAgeS, firmwareFault, linkError, backendUnresponsive,

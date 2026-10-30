@@ -176,6 +176,13 @@ function CsvRunPanel({
             <span className="csv-result-key">Samples</span>
             <span className="csv-result-val" style={{ color: "rgba(255,255,255,0.4)" }}>{result.sampleCount}</span>
           </div>
+          {result.clipped > 0 && (
+            <div className="csv-error">
+              ⚠ {result.clipped} of {result.sampleCount} samples in the RPM window hit the
+              accelerometer's range limit. Amplitude and phase are not reliable; re-record
+              at a higher range.
+            </div>
+          )}
         </div>
       )}
     </div>

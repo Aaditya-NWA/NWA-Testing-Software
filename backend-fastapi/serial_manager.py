@@ -8,7 +8,7 @@ Three invariants, each fixing a bug that was hard to see:
      one serial.Serial race for lines. Non-telemetry lines go onto
      _control_line_queue; send_*_and_confirm() reads acks from there.
 
-  2. Commands are confirmed, not fired and forgotten. CONFIG, SR and BAUD each
+  2. Commands are confirmed, not fired and forgotten. CONFIG, SR, FS and BAUD each
      block until the firmware echoes its ack, and the value parsed from that
      ack -- not the requested one -- becomes ground truth.
 
@@ -45,6 +45,7 @@ from frame_protocol import (
     FLAG_TX_DROP,
     FrameDecoder,
     g_per_lsb,
+    is_clipped,
 )
 from logger import CSVLogger
 from signal_chain import DCRemover, SampleClock
@@ -134,6 +135,11 @@ class SerialManager:
 
         self.confirmed_sampling_rate: Optional[str] = None
 
+        # [v12] Accel full scale. accel_range_g is what the frames themselves
+        # report (scale_code) -- the range every sample was actually scaled by.
+        self.confirmed_accel_range_g: Optional[int] = None
+        self.accel_range_g: Optional[int] = None
+
         self.current_baud: int = self.BOOT_BAUD
 
         # ── [NEW v9] Binary telemetry decode state ───────────────────
@@ -155,6 +161,7 @@ class SerialManager:
             "measured_rate_hz": 0.0,
             "tag_fallback": False,  # multi-word FIFO burst unsupported
             "timeline_breaks": 0,   # [v15] sample gaps (IMU fault/recovery)
+            "clipped_samples": 0,   # [v12 FW] a raw count at the range limit
         }
         self._last_seq: Optional[int] = None
 
@@ -188,6 +195,8 @@ class SerialManager:
         self._last_seq = None
         self.board_info = None
         self.firmware_protocol = "unknown"
+        self.confirmed_accel_range_g = None
+        self.accel_range_g = None
         for k, v in self.stats.items():
             self.stats[k] = (0.0 if isinstance(v, float)
                              else False if isinstance(v, bool) else 0)
@@ -455,6 +464,20 @@ class SerialManager:
         return self._send_and_confirm(f"AA:{code}\n", "AA applied",
                                       "AA parse error", timeout_s)
 
+    def send_accel_range_and_confirm(self, range_g: int, timeout_s: float = 3.0):
+        """Sends FS:<g> -- v12+ firmware only; older boards ignore it and stay
+        at 4g. Returns (confirmed, range the firmware reports, raw ack)."""
+        confirmed, raw = self._send_and_confirm(
+            f"FS:{range_g}\n", "FS applied", "FS error", timeout_s
+        )
+        if not confirmed:
+            return False, self.confirmed_accel_range_g, raw
+        m = re.search(r"FS applied:\s*(\d+)g", raw)
+        if not m:
+            return False, self.confirmed_accel_range_g, raw
+        self.confirmed_accel_range_g = int(m.group(1))
+        return True, self.confirmed_accel_range_g, raw
+
     def send_timing_and_confirm(self, enabled: bool, timeout_s: float = 3.0):
         """Sends TIMING:ON|OFF — P0 instrumentation. v9+ firmware only."""
         arg = "ON" if enabled else "OFF"
@@ -707,7 +730,9 @@ class SerialManager:
             mcu_s_last = self._clock.update(f["t_us"], last_index, host_perf)
         self.stats["measured_rate_hz"] = round(self._clock.measured_rate_hz, 3)
 
-        scale = g_per_lsb(f["scale_code"])
+        scale_code = f["scale_code"]
+        scale = g_per_lsb(scale_code)
+        self.accel_range_g = scale_code
 
         rpm_count = f["rpm_count"]
         rpm_period = f["rpm_period"]
@@ -717,6 +742,11 @@ class SerialManager:
         base_index = f["sample_index"]
 
         for i, (rx, ry, rz) in enumerate(f["raw"]):
+            if is_clipped(rx, ry, rz):
+                self.stats["clipped_samples"] += 1
+                if self.stats["clipped_samples"] == 1:
+                    self._event("ACCEL_CLIP", f"first clipped sample at +/-{scale_code}g, "
+                                              f"throttle={throttle}us")
             ax = rx * scale
             ay = ry * scale
             az = rz * scale
@@ -742,6 +772,7 @@ class SerialManager:
                 "mcuUs":    round(mcu_s * 1e6, 1),
                 "rpmCount": rpm_count,
                 "rpmPeriod": rpm_period,
+                "accelRangeG": scale_code,
             })
 
     def _emit_sample(self, data: dict):

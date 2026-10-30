@@ -2,10 +2,14 @@
 // Pure influence-coefficient single-plane balancing math.
 // No external dependencies — all vanilla TS.
 
+import { clipSummary } from "./accelRange";
+
 export interface RunResult {
   amp: number;
   phase: number;
   sampleCount: number;
+  /** Samples in the RPM window at the accelerometer's range limit. */
+  clipped: number;
 }
 
 export interface CorrectionResult {
@@ -131,7 +135,9 @@ export function computeAmpPhase(
 
   const phase = complexAngleDeg(meanRe, meanIm);
 
-  return { amp, phase, sampleCount: gated.length };
+  const clipped = clipSummary(gated, headers).clipped;
+
+  return { amp, phase, sampleCount: gated.length, clipped };
 }
 
 // ── Influence coefficient correction ──────────────────────────────────────────

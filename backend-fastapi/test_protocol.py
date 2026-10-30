@@ -23,6 +23,9 @@ from frame_protocol import (
     decode_telemetry_payload,
     encode_telemetry,
     g_per_lsb,
+    is_clipped,
+    ACCEL_RANGES_G,
+    DEFAULT_ACCEL_RANGE_G,
     FLAG_FIFO_OVERRUN,
     TELEMETRY_HEADER_LEN,
 )
@@ -72,6 +75,17 @@ if out and out[0][0] == "telemetry":
     check("scale code default 4g", d["scale_code"] == 4)
 
 check("g_per_lsb(4) == 0.000122", abs(g_per_lsb(4) - 0.000122) < 1e-12)
+
+print("\n-- [v12 FW] Accel range ----------------------------")
+# LSM6DSO datasheet sensitivities; each range doubles the previous one.
+for _g, _mg in [(2, 0.061), (4, 0.122), (8, 0.244), (16, 0.488)]:
+    check(f"g_per_lsb({_g}) == {_mg} mg", abs(g_per_lsb(_g) - _mg / 1000) < 1e-12)
+for _g in ACCEL_RANGES_G:
+    _f = encode_telemetry(1, 0, 0, 1200, 0, 0, 1000, [(1, 2, 3)], scale_code=_g)
+    check(f"scale_code {_g} round trips", decode_telemetry_payload(_f[4:-2])["scale_code"] == _g)
+check("int16 limits count as clipped",
+      is_clipped(32767, 0, 0) and is_clipped(0, -32768, 0) and is_clipped(0, 0, 32700))
+check("1 g of gravity at 2g is not clipped", not is_clipped(0, -16393, 0))
 
 print("\n-- Negative / signed values ------------------------")
 neg = encode_telemetry(1, 0, 0, 1200, 0, 0, 1000,
@@ -233,7 +247,7 @@ else:
 
     for _tok in ["ESC Armed", "Active profile: THR_MIN=", "CONFIG applied:",
                  "SR applied", "BAUD applied", "READY",
-                 "AA applied", "TIMING applied"]:
+                 "AA applied", "TIMING applied", "FS applied: ", "FS error"]:
         check("ack string present: " + repr(_tok), _tok in _src)
 
     # [v15] Fault reporting: serial_manager matches these prefixes.
@@ -260,6 +274,27 @@ else:
     _wdt, _arm = _setup.find("wdt_enable("), _setup.find("delay(8000)")
     check("watchdog enabled only after the 8 s arming delay", 0 <= _arm < _wdt,
           f"arm@{_arm} wdt@{_wdt}")
+
+    # [v12 FW] Accel range. The FS_XL encoding is out of numeric order
+    # (datasheet: 00=2g 01=16g 10=4g 11=8g), so a transposed case reads as
+    # a plausible range and scales every sample wrong by 2-8x.
+    _bits = {int(g): int(b, 0) for g, b in
+             _re.findall(r"case\s+(\d+):\s*return\s+(0x[0-9A-Fa-f]+);",
+                         _src[_src.find("accelRangeBits("):_src.find("applyAccelRange(")])}
+    check("firmware FS_XL bits match the LSM6DSO datasheet",
+          _bits == {2: 0x00, 4: 0x08, 8: 0x0C, 16: 0x04}, str(_bits))
+    check("firmware accepts exactly the codec's ranges",
+          sorted(_bits) == sorted(ACCEL_RANGES_G), str(sorted(_bits)))
+    _m = _re.search(r"^uint8_t\s+accelFsG\s*=\s*(\d+)\s*;", _src, _re.M)
+    check("firmware boots at the default range",
+          _m is not None and int(_m.group(1)) == DEFAULT_ACCEL_RANGE_G
+          and f"setAccelRange({DEFAULT_ACCEL_RANGE_G})" in _src, str(_m and _m.group(0)))
+    check("frames report the live range, not a literal",
+          "PUSH8(accelFsG)" in _src and not _re.search(r"PUSH8\(\d+\);\s*// scale_code", _src))
+    _rec = _src[_src.find("static void tryImuRecover()"):]
+    _rec = _rec[:_rec.find("\n}\n")]
+    check("IMU recovery re-applies the chosen range",
+          "applyAccelRange(accelFsG)" in _rec)
 
     _main_py = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "main.py")
     with open(_main_py, encoding="utf-8") as _fh:

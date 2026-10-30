@@ -13,6 +13,7 @@
 //   SR:DEFAULT|416|833      sampling mode
 //   BAUD:<rate>             runtime UART switch
 //   AA:<0-7>                anti-alias corner
+//   FS:2|4|8|16             accelerometer full scale in g (boot default 4)
 //   TIMING:ON|OFF           per-section timing
 //   HB                      host heartbeat (arms the link-loss failsafe)
 //
@@ -71,7 +72,7 @@ Servo esc;
 LSM6DSO imu;
 
 // ── Firmware identity ────────────────────────────────────────
-#define FW_VERSION "v11"
+#define FW_VERSION "v12"
 
 #if defined(__AVR_ATmega328P__)
   #define BOARD_ID "AVR-ATmega328P"
@@ -113,6 +114,10 @@ uint8_t  decimateCounter    = 0;
 #define DECIM_DEFAULT 167
 
 uint8_t aaCode = 0;   // default ODR/4 = 208Hz at 833Hz ODR
+
+// [v12] Accel full scale in g. Sent as every frame's scale_code, so it must
+// only ever hold the range the sensor actually confirmed.
+uint8_t accelFsG = 4;
 
 #define DEBOUNCE_NUM 3
 #define DEBOUNCE_DEN 8
@@ -259,6 +264,8 @@ uint8_t  pendingFlags = 0;   // sticky until reported in the next frame
 int16_t batchBuf[MAX_BATCH * 3];
 uint8_t batchCount = 0;
 
+static void emitFrame(uint32_t tUs);
+
 // ── [NEW v9] P0 timing instrumentation (RESEARCH.md §17.2) ───
 bool     timingEnabled  = false;
 uint32_t tI2cUs         = 0;   // accumulated microseconds in FIFO reads
@@ -367,6 +374,36 @@ static void stopFifo() {
 static void clearFifo() {
   regUpdate(REG_FIFO_CTRL4, 0x07, 0x00);
   regUpdate(REG_FIFO_CTRL4, 0x07, 0x06);
+}
+
+// FS_XL bits of CTRL1_XL are not in numeric order, and hold this meaning only
+// while XL_FS_MODE (CTRL8_XL bit 1) is 0 -- with it set, 01 means 2g.
+static uint8_t accelRangeBits(int g) {
+  switch (g) {
+    case 2:  return 0x00;
+    case 4:  return 0x08;
+    case 8:  return 0x0C;
+    case 16: return 0x04;
+    default: return 0xFF;
+  }
+}
+
+// Switch the accel range, verified by reading it back. Pending samples go out
+// first under the old range, and the FIFO is cleared, so no frame ever labels
+// a sample with a range it was not measured at.
+static bool applyAccelRange(int g) {
+  uint8_t bits = accelRangeBits(g);
+  if (bits == 0xFF) return false;
+  emitFrame(micros());
+  if (!regUpdate(REG_CTRL8_XL, 0x02, 0x00)) return false;
+  if (!regUpdate(REG_CTRL1_XL, 0x0C, bits)) return false;
+  uint8_t v;
+  if (imu.readRegister(&v, REG_CTRL1_XL) != IMU_SUCCESS || (v & 0x0C) != bits) return false;
+  accelFsG = (uint8_t)g;
+  clearFifo();
+  batchCount      = 0;
+  decimateCounter = 0;
+  return true;
 }
 
 void applySamplingMode(SamplingMode m) {
@@ -521,7 +558,7 @@ void setup() {
   Serial.print(F(" AA_CODE=")); Serial.print(aaCode);
   Serial.print(F(" BURST=")); Serial.println(burstWords);
 
-  Serial.println(F("ESC Armed. Commands: throttle µs | AUTO_TEST | STOP_TEST | THROTTLE_HOLD:<us>,<hold_ms> | STOP_HOLD | CONFIG:<min>,<max> | SR:DEFAULT|416|833 | BAUD:<rate> | AA:<0-7> | TIMING:ON|OFF | HB"));
+  Serial.println(F("ESC Armed. Commands: throttle µs | AUTO_TEST | STOP_TEST | THROTTLE_HOLD:<us>,<hold_ms> | STOP_HOLD | CONFIG:<min>,<max> | SR:DEFAULT|416|833 | BAUD:<rate> | AA:<0-7> | FS:2|4|8|16 | TIMING:ON|OFF | HB"));
   Serial.print(F("Active profile: THR_MIN=")); Serial.print(THR_MIN);
   Serial.print(F(" THR_MAX=")); Serial.println(THR_MAX);
 
@@ -555,6 +592,8 @@ static void tryImuRecover() {
   i2cBusRecover();
   i2cStart();
   if (!imuConfigure()) return;
+  // imuConfigure() sets 4g; a range the host chose must survive recovery.
+  if (!applyAccelRange(accelFsG)) return;
 
   uint8_t aa = aaCode;                 // applySamplingMode() picks its own corner
   applySamplingMode(samplingMode);
@@ -677,6 +716,17 @@ static void handleCommand(char *cmd) {
       Serial.println(F("AA parse error. Format: AA:<0-7>"));
     }
   }
+  else if (strncmp(cmd, "FS:", 3) == 0) {
+    int g = atoi(cmd + 3);
+    if (accelRangeBits(g) == 0xFF) {
+      Serial.println(F("FS error: bad range. Format: FS:2|4|8|16"));
+    } else if (applyAccelRange(g)) {
+      Serial.print(F("FS applied: ")); Serial.print(accelFsG); Serial.println(F("g"));
+    } else {
+      applyAccelRange(accelFsG);   // best effort back to the range frames still report
+      Serial.println(F("FS error: IMU did not confirm the range"));
+    }
+  }
   // [NEW v9] TIMING:ON|OFF — P0 instrumentation, RESEARCH.md §17.2.
   else if (strncmp(cmd, "TIMING:", 7) == 0) {
     const char *arg = cmd + 7;
@@ -777,7 +827,7 @@ static void emitFrame(uint32_t tUs) {
   PUSH16((uint16_t)throttle);
   PUSH8(batchCount);
   PUSH8(pendingFlags);
-  PUSH8(4);                                  // scale_code: ±4g
+  PUSH8(accelFsG);                           // scale_code: full scale in g
   PUSH8((uint8_t)(ACCEL_ODR_HZ / 10));       // odr_code: 83 => 833Hz
 
   for (uint8_t i = 0; i < batchCount * 3; i++) {

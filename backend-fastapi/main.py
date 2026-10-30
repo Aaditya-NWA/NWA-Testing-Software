@@ -307,6 +307,9 @@ MAX_STEPS = 20
 class SamplingRateRequest(BaseModel):
     mode: Literal["DEFAULT", "416", "833"] = "DEFAULT"
 
+class AccelRangeRequest(BaseModel):
+    range_g: Literal[2, 4, 8, 16] = 4
+
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 @app.get("/ports")
@@ -409,6 +412,35 @@ async def set_sampling_rate(
             "confirmed": False,
             "message": "Arduino did not confirm the sampling rate — firmware may be running an older sketch without SR support, or the command was lost.",
         }
+
+
+@app.post("/set_accel_range")
+async def set_accel_range(
+    req: AccelRangeRequest, sess: auth.Session = Depends(needs_hardware)
+):
+    if not serial_mgr.is_connected:
+        return {"status": "error", "message": "Not connected"}
+    if _step_test["running"]:
+        return {"status": "error", "message": "Stop the step test before changing the range"}
+
+    confirmed, actual, _ = await asyncio.to_thread(
+        serial_mgr.send_accel_range_and_confirm, req.range_g
+    )
+    activity_log.log(
+        "ACCEL_RANGE",
+        f"requested +/-{req.range_g}g -> "
+        + (f"confirmed +/-{actual}g" if confirmed else
+           f"unconfirmed, frames report +/-{serial_mgr.accel_range_g or '?'}g"),
+        sess,
+    )
+    if confirmed:
+        return {"status": "ok", "confirmed": True, "range_g": actual}
+    return {
+        "status": "error",
+        "confirmed": False,
+        "message": f"Arduino did not confirm ±{req.range_g} g. Firmware older than v12 "
+                   f"ignores the range command and keeps measuring at ±4 g.",
+    }
 
 
 class SaveMotorProfileRequest(BaseModel):
@@ -784,6 +816,9 @@ def get_status(sess: auth.Session = Depends(needs_login)):
         "active_profile": dict(active_profile),
         # [NEW] Ground truth for the active IMU sampling mode
         "confirmed_sampling_rate": serial_mgr.confirmed_sampling_rate,
+        # [v12 FW] Range the frames report -- what samples were scaled by.
+        "accel_range_g": serial_mgr.accel_range_g,
+        "confirmed_accel_range_g": serial_mgr.confirmed_accel_range_g,
         # [NEW] Ground truth for the UART speed actually in use
         "active_baud": serial_mgr.current_baud,
         "board_info": serial_mgr.board_info,

@@ -23,6 +23,7 @@ _COLUMNS = [
     "Timestamp", "SampleIndex", "McuMicros", "Throttle", "RPM", "RpmCount",
     "AccX", "AccY", "AccZ",
     "VibX", "VibY", "VibZ",
+    "AccelRangeG",   # [v12 FW] appended last so readers by position are unaffected
 ]
 
 _SENTINEL = object()
@@ -169,6 +170,7 @@ class CSVLogger:
             "VibX":        data["vibX"],
             "VibY":        data["vibY"],
             "VibZ":        data["vibZ"],
+            "AccelRangeG": data.get("accelRangeG", ""),
         }
         try:
             self._queue.put_nowait(row)

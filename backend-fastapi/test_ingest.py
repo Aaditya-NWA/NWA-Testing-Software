@@ -191,13 +191,15 @@ check("header has the v9 columns",
       header[:6] == ["Timestamp", "SampleIndex", "McuMicros", "Throttle", "RPM", "RpmCount"],
       str(header))
 check("legacy columns still present in order",
-      header[6:] == ["AccX", "AccY", "AccZ", "VibX", "VibY", "VibZ"], str(header[6:]))
+      header[6:12] == ["AccX", "AccY", "AccZ", "VibX", "VibY", "VibZ"], str(header[6:]))
+check("AccelRangeG appended last", header[12:] == ["AccelRangeG"], str(header[12:]))
 check("all rows written", len(lines) - 1 == N_BATCHES * N_BATCH,
       f"got {len(lines)-1}")
 check("no rows dropped", log.dropped_rows == 0, str(log.dropped_rows))
 
 fields = lines[1].split(",")
-check("every row has 12 fields", len(fields) == 12, str(len(fields)))
+check("every row has 13 fields", len(fields) == 13, str(len(fields)))
+check("4g frames log AccelRangeG=4", fields[12] == "4", fields[12])
 check("timestamps are distinct across rows",
       lines[1].split(",")[0] != lines[400].split(",")[0])
 
@@ -221,6 +223,38 @@ for kind, item in mgr3._decoder.feed(ovr):
     if kind == "telemetry":
         mgr3._handle_telemetry(item)
 check("FIFO overrun counted", mgr3.stats["fifo_overruns"] == 1)
+
+print("\n-- [v12 FW] Accel range and clipping -------------------")
+check("4g run has no clipped samples", mgr.stats["clipped_samples"] == 0)
+check("range taken from the frames", mgr.accel_range_g == 4, str(mgr.accel_range_g))
+
+def _ingest(frame_bytes):
+    m = SerialManager(ws_manager=_NullWs(), csv_logger=CSVLogger())
+    for kind, item in m._decoder.feed(frame_bytes):
+        if kind == "telemetry":
+            m._handle_telemetry(item)
+    out = []
+    while True:
+        try:
+            out.append(m._data_queue.get_nowait())
+        except queue.Empty:
+            return m, out
+
+# The same raw counts mean twice the acceleration at 8g as at 4g.
+raw = [(1000, -8196, 4098)] * 4
+m4, s4 = _ingest(encode_telemetry(0, 0, 1000, 1200, 0, 0, 1000, raw, scale_code=4))
+m8, s8 = _ingest(encode_telemetry(0, 0, 1000, 1200, 0, 0, 1000, raw, scale_code=8))
+check("4g scaling unchanged (0.122 mg/LSB)",
+      s4[0]["accX"] == round(1000 * 0.000122, 5) and s4[0]["accelRangeG"] == 4, str(s4[0]))
+check("8g samples scale at 0.244 mg/LSB",
+      abs(s8[0]["accY"] - 2 * s4[0]["accY"]) < 1e-4 and s8[0]["accelRangeG"] == 8,
+      f'{s8[0]["accY"]} vs {s4[0]["accY"]}')
+check("range reported per connection", m8.accel_range_g == 8)
+
+mc, _ = _ingest(encode_telemetry(0, 0, 1000, 1200, 0, 0, 1000,
+                                 [(0, 32767, 0), (0, 100, 0), (-32768, 0, 0)], scale_code=2))
+check("clipped samples counted", mc.stats["clipped_samples"] == 2,
+      str(mc.stats["clipped_samples"]))
 
 print("\n-- Legacy ASCII firmware compatibility -----------------")
 mgr4 = SerialManager(ws_manager=_NullWs(), csv_logger=CSVLogger())

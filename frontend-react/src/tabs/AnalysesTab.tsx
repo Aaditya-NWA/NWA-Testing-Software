@@ -16,6 +16,7 @@ import {
   ResponsiveContainer, ReferenceDot, ReferenceLine,
 } from "recharts";
 import { parseCSV } from "../lib/balancing";
+import { clipSummary, ClipSummary, rangeText } from "../lib/accelRange";
 import {
   computeSpectrum, analyseGrid, longestContiguousRun, orderFrequencies,
   peakNear, SpectrumResult,
@@ -30,6 +31,7 @@ import {
 interface GAFile {
   name: string;
   rows: Record<string, number>[];
+  clip: ClipSummary;
 }
 
 type GraphMode = "RMS" | "WAVEFORM" | "SPECTRUM" | "ALL";
@@ -140,7 +142,7 @@ export default function AnalysesTab({ fullscreen = false }: { fullscreen?: boole
           setParseError(`${f.name}: no RPM column found`);
           continue;
         }
-        newFiles.push({ name: f.name, rows: parsed.rows });
+        newFiles.push({ name: f.name, rows: parsed.rows, clip: clipSummary(parsed.rows, parsed.headers) });
       } catch (err: any) {
         setParseError(`${f.name}: ${err.message || "failed to parse"}`);
       }
@@ -456,9 +458,10 @@ export default function AnalysesTab({ fullscreen = false }: { fullscreen?: boole
           {files.length > 0 && (
             <div style={{ marginTop: 10 }}>
               {files.map((f, i) => (
-                <div key={i} style={{
+                <div key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+                <div style={{
                   display: "flex", justifyContent: "space-between", alignItems: "center",
-                  fontSize: 13, padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,0.06)",
+                  fontSize: 13, padding: "4px 0",
                 }}>
                   <span style={{
                     display: "inline-flex", alignItems: "center", gap: 6, overflow: "hidden",
@@ -474,6 +477,13 @@ export default function AnalysesTab({ fullscreen = false }: { fullscreen?: boole
                     style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 12 }}>
                     ✕
                   </button>
+                </div>
+                {f.clip.clipped > 0 && (
+                  <div style={{ fontSize: 10, color: "#f5a623", paddingBottom: 4 }}>
+                    ⚠ {f.clip.clipped.toLocaleString()} samples clipped at {rangeText(f.clip.ranges)}
+                    {" "}— peaks and amplitudes there are understated.
+                  </div>
+                )}
                 </div>
               ))}
               <button className="btn btn-disconnect" style={{ marginTop: 8, width: "100%" }} onClick={clearAll}>

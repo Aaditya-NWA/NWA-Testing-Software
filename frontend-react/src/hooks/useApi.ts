@@ -93,6 +93,7 @@ export const api = {
   setMotorProfile:      (thr_min: number, thr_max: number)                    => req("/set_motor_profile",      { thr_min, thr_max }),
   // [NEW] Sampling rate — pushes the selected IMU sampling mode to the Arduino right after connect
   setSamplingRate:      (mode: string)                                        => req("/set_sampling_rate",      { mode }),
+  setAccelRange:        (range_g: number)                                     => req("/set_accel_range",        { range_g }),
   setThrottle:          (value: number)                                       => req("/set_throttle",           { value }),
   emergencyStop:        ()                                                    => req("/emergency_stop",         null, true),
   startLogging:         (filename?: string)                                   => req("/start_logging",          filename ? { filename } : null, true),

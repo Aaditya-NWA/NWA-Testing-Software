@@ -83,6 +83,11 @@ cd backend-fastapi; python test_auth.py
 # rounding, and that a degenerate range yields no NaN
 cd frontend-react; npm run test:throttle
 
+# Frontend [v16] — accel range: that the CSV clip limit at every range agrees
+# with the backend's CLIP_COUNTS to the count, that each row is judged at its
+# own logged range, and that pre-v9 logs (no known range) are not judged
+cd frontend-react; npm run test:range
+
 # Backend [v14] — packaging: the version string across all four files, the
 # constants shared with src-tauri/src/backend.rs (ready marker, port-busy
 # exit code, health signature, runtime file path), that no test module can
@@ -100,7 +105,7 @@ cd backend-fastapi; python test_deployment.py
 cd backend-fastapi; python test_link_safety.py
 ```
 
-All ten exit non-zero on failure. The three frontend suites share one
+All eleven exit non-zero on failure. The four frontend suites share one
 runner (`run_test.mjs <name>`) — they were three copy-pasted files until v13.
 
 **None of these ship.** No app module imports a test, they appear nowhere in
@@ -109,7 +114,7 @@ imports no test module — `backend.spec` also excludes them by name, and
 `test_deployment.py` asserts both. They are dev-time only. Run them plus
 `npm run build` after touching the protocol, the signal chain, `fft.ts`, the
 Step Test sequencer, the motor profile store, `plotData.ts`, `throttle.ts`,
-`auth.py`, or anything under `src-tauri/`.
+`accelRange.ts`, `auth.py`, or anything under `src-tauri/`.
 
 `npm run build` (tsc strict + vite) remains the typecheck gate for TypeScript.
 
@@ -554,7 +559,8 @@ Changing either side without the other breaks the link silently.
   `CONFIG:<min>,<max>`, `SR:DEFAULT|416|833`, `BAUD:<rate>`,
   and **[v9]** `AA:<0-7>` (anti-alias corner) and `TIMING:ON|OFF`
   (per-section µs instrumentation), and **[v15 / FW v11]** `HB` (host
-  heartbeat, every 250 ms; arms the firmware's link-loss failsafe).
+  heartbeat, every 250 ms; arms the firmware's link-loss failsafe), and
+  **[v16 / FW v12]** `FS:2|4|8|16` (accelerometer full scale).
 - **[v15 / FW v11] Fault lines** (firmware → host), matched by prefix in
   `serial_manager._handle_control_line` and asserted by `test_protocol.py`:
   `IMU_FAULT`, `IMU_RECOVERED`, `IMU not detected`, `FAILSAFE`,
@@ -562,13 +568,66 @@ Changing either side without the other breaks the link silently.
   mid-session = the board rebooted).
 - **Ack strings** are matched by regex/substring in `serial_manager.py`
   (`ESC Armed`, `Active profile: THR_MIN=x THR_MAX=y`, `CONFIG applied:`,
-  `SR applied`, `BAUD applied`, `READY`, `AA applied`, `TIMING applied`, and the
-  `* parse error` variants). Rewording a `Serial.println()` in the firmware
+  `SR applied`, `BAUD applied`, `READY`, `AA applied`, `TIMING applied`,
+  `FS applied: <g>g`, and the `* parse error` / `FS error` variants). Rewording a `Serial.println()` in the firmware
   silently breaks confirmation — `test_protocol.py` now asserts each of these
   strings still exists verbatim in the `.ino`.
 - **[v9] The firmware reports its own identity** on boot, just before
   `ESC Armed`: `BOARD=<id> FW=v9 F_CPU=<hz> ODR=<hz> AA_CODE=<n> BURST=<n>`.
   Surfaced through `/status` as `board_info`.
+
+## Accelerometer range — selectable, default ±4 g [NEW v16 / FW v12]
+
+Requested by R&D to compare ranges. The connection bar's ACCEL selector picks
+±2/4/8/16 g at connect time and is locked while connected, like SAMPLING.
+
+**At the default, nothing changes.** The board boots at ±4 g on every connect
+(DTR reset), so selecting 4 sends no command at all — same connect sequence,
+same sensor setting, same 0.122 mg/LSB, same g values. `test_ingest.py` pins
+the 4 g scaling, and `test_protocol.py` pins the boot default.
+
+**The frame's `scale_code` is the ground truth, not the ack.** It always said
+4 because the firmware hardcoded it; it now carries `accelFsG`, which
+`applyAccelRange()` sets only after reading the range back from CTRL1_XL. The
+backend already scaled each frame by its own `scale_code`, so a range change
+mid-stream is scaled correctly per frame. `/status` reports both
+`accel_range_g` (from frames) and `confirmed_accel_range_g` (from the ack).
+Before switching, the firmware emits its pending batch under the old range and
+clears the FIFO, so no frame labels a sample with a range it was not measured
+at.
+
+Three things that fail silently if broken:
+
+* **The FS_XL encoding is out of numeric order** (00=2g, 01=16g, 10=4g,
+  11=8g) and holds only while XL_FS_MODE (CTRL8_XL bit 1) is 0 — with it set,
+  01 means 2g. `applyAccelRange()` clears that bit explicitly.
+  `test_protocol.py` checks the firmware's table against the datasheet,
+  because a transposed case gives a plausible range that scales every sample
+  wrong by 2–8×.
+* **IMU recovery re-applies the range.** `imuConfigure()` sets 4 g, so
+  without this a recovered sensor goes back to 4 g while the host still
+  expects the chosen range. If re-applying fails, the board stays in
+  IMU_FAULT and retries.
+* **Older firmware ignores `FS:`** (`atoi("FS:8")` is 0, which is outside the
+  throttle range). A non-default selection on such a board times out
+  after 3 s. The bar warns, and the frames keep reporting 4, so the data is
+  still scaled right.
+
+**Clipping is detected, not prevented.** A raw count at or past
+`CLIP_COUNTS` (32700; the sensor saturates at the int16 limits) is counted in
+`stats.clipped_samples`, the first one per connection is written to the
+activity log (`ACCEL_CLIP`), and the bar warns while connected. Logs carry a
+trailing `AccelRangeG` column, appended last so anything that reads columns by
+position is unaffected. Analyses and Correction Mass Validation flag clipped
+rows from it (`lib/accelRange.ts`). A log without the column but with
+`McuMicros` is from v9–v11 firmware and is judged at 4 g. Older logs have no
+known range and are not judged.
+
+**Why ±2 g warns.** The vertical axis carries 1 g of gravity, so at ±2 g it
+clips after about 1 g of vibration in one direction. Several existing logs
+peak at 2–3.2 g. Measured motor-off noise is ~0.3–0.7 mg RMS, already 3–6
+LSBs at ±4 g, so ±2 g's finer step buys no usable resolution. That is what
+R&D's comparison is meant to confirm or overturn on real data.
 
 ## The board is an ATmega328P — 2 KB SRAM is a hard constraint
 

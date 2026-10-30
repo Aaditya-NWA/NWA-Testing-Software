@@ -1,6 +1,6 @@
 // Runs one src/lib/<name>.test.ts without a test framework.
 //
-//   node run_test.mjs fft | plotData | throttle      (see package.json)
+//   node run_test.mjs fft | plotData | throttle | accelRange   (see package.json)
 //
 // esbuild is already a Vite dependency, so this adds nothing to
 // package.json. The bundle goes to the OS temp dir so it never lands in the

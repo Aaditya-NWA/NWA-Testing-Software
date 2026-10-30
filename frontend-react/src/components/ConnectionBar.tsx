@@ -14,6 +14,7 @@
 
 import { useConnection, BAUD_RATES, SAMPLING_RATES } from "../context/connection";
 import { SamplingRateId } from "../types";
+import { ACCEL_RANGES, AccelRangeG } from "../lib/accelRange";
 
 const FAULT_TITLE: Record<string, string> = {
   imu:      "IMU fault — motor stopped by the Arduino",
@@ -75,6 +76,17 @@ export default function ConnectionBar() {
           disabled={c.connected}
         >
           {SAMPLING_RATES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+        </select>
+
+        <label className="connbar-label">ACCEL</label>
+        <select
+          className="connbar-select"
+          value={c.accelRangeG}
+          onChange={e => c.setAccelRangeG(Number(e.target.value) as AccelRangeG)}
+          disabled={c.connected}
+          title={c.connected ? "Locked while connected — disconnect to change" : "Accelerometer full-scale range"}
+        >
+          {ACCEL_RANGES.map(r => <option key={r.g} value={r.g}>{r.label}</option>)}
         </select>
 
         <label className="connbar-label">MOTOR</label>
@@ -151,18 +163,36 @@ export default function ConnectionBar() {
           and the operator is told what is different from what they asked
           for, rather than the connect being refused outright. */}
       {(c.pairingWarning || c.baudSwitchWarning || c.samplingRateAckError ||
+        c.accelRangeAckError || (c.connected && c.clippedSamples > 0) ||
+        (!c.connected && c.accelRangeG === 2) ||
         c.profileMismatch || c.firmwareWarning || (c.connected && c.confirmedRange)) && (
         <div className="connbar-notes">
           {c.connected && c.confirmedRange && !c.profileMismatch && (
             <span className="connbar-ok">
               ✓ Arduino confirmed {c.confirmedRange.min}–{c.confirmedRange.max} µs
               {c.activeBaud != null && !c.baudSwitchWarning ? ` at ${c.activeBaud} baud` : ""}
+              {c.liveAccelRangeG != null ? ` · accel ±${c.liveAccelRangeG} g` : ""}
             </span>
           )}
           {c.firmwareWarning     && <span className="connbar-warn">⚠ {c.firmwareWarning}</span>}
           {c.profileMismatch     && <span className="connbar-warn">⚠ {c.profileMismatch}</span>}
           {c.baudSwitchWarning   && <span className="connbar-warn">⚠ {c.baudSwitchWarning}</span>}
           {c.samplingRateAckError&& <span className="connbar-warn">⚠ {c.samplingRateAckError}</span>}
+          {c.accelRangeAckError  && <span className="connbar-warn">⚠ {c.accelRangeAckError}</span>}
+          {c.connected && c.clippedSamples > 0 && (
+            <span className="connbar-warn">
+              ⚠ {c.clippedSamples.toLocaleString()} sample{c.clippedSamples === 1 ? "" : "s"} hit
+              the ±{c.liveAccelRangeG ?? "?"} g limit since connecting. Vibration at those moments
+              is clipped, so amplitude and phase from this run are not reliable. Reconnect at a
+              higher range.
+            </span>
+          )}
+          {!c.connected && c.accelRangeG === 2 && (
+            <span className="connbar-hint">
+              ⚠ At ±2 g the vertical axis already carries 1 g of gravity, so it clips after about
+              1 g of vibration in one direction.
+            </span>
+          )}
           {!c.connected && c.pairingWarning && <span className="connbar-hint">⚠ {c.pairingWarning}</span>}
         </div>
       )}
